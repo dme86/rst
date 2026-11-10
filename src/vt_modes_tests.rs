@@ -224,3 +224,38 @@ fn ris_resets_modes_tabs_colors_and_margins() {
     t.advance(b"\t");
     assert_eq!(t.screen.x, 8);
 }
+
+#[test]
+fn saved_cursor_restores_decom_state_and_scrolling_region_coordinates() {
+    let mut t = term(10, 6);
+    t.advance(b"\x1b[2;5r\x1b[?6h\x1b[2;3H\x1b[?1048h");
+    assert_eq!((t.screen.x, t.screen.y), (2, 2));
+    t.advance(b"\x1b[?6l\x1b[6;8H");
+    assert!(!t.screen.origin_mode);
+    t.advance(b"\x1b[?1048l");
+    assert!(t.screen.origin_mode);
+    assert_eq!((t.screen.x, t.screen.y), (2, 2));
+    t.advance(b"\x1b[1;1H*");
+    assert_eq!(t.screen.grid[1][0].ch, '*');
+}
+
+#[test]
+fn single_column_terminal_never_moves_cursor_outside_grid() {
+    let mut t = term(1, 2);
+    t.advance("界A".as_bytes());
+    assert!(t.screen.x < t.screen.cols);
+    assert!(t.screen.y < t.screen.rows);
+    assert_eq!(t.screen.grid[0][0].ch, '?');
+    assert_eq!(t.screen.grid[1][0].ch, 'A');
+}
+
+#[test]
+fn cursor_movement_cancels_pending_wrap_but_sgr_does_not() {
+    let mut t = term(3, 3);
+    t.advance(b"abc\x1b[1m");
+    assert!(t.screen.wrap_pending);
+    t.advance(b"\x1b[2GX");
+    assert_eq!(text_row(&t, 0), "aXc");
+    assert_eq!(t.screen.y, 0);
+    assert!(!t.screen.wrap_pending);
+}
