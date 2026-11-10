@@ -87,6 +87,12 @@ impl MouseReporter {
         *self = Self::default();
     }
 
+    /// Discard a partial wheel gesture when reporting is bypassed by Shift.
+    pub fn reset_scroll(&mut self) {
+        self.wheel_x = 0.0;
+        self.wheel_y = 0.0;
+    }
+
     pub fn button(
         &mut self,
         button: MouseButton,
@@ -159,8 +165,7 @@ impl MouseReporter {
         mods: ModifiersState,
     ) -> Vec<u8> {
         if !tracking.enabled() || mods.shift_key() {
-            self.wheel_x = 0.0;
-            self.wheel_y = 0.0;
+            self.reset_scroll();
             return Vec::new();
         }
         let (x, y) = match delta {
