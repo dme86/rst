@@ -267,13 +267,14 @@ impl Screen {
 
     fn tab(&mut self, steps: i32) {
         self.wrap_pending = false;
+        let count = steps.unsigned_abs().min(self.cols as u32);
         if steps > 0 {
-            for _ in 0..steps {
+            for _ in 0..count {
                 let next = (self.x + 1..self.cols).find(|&col| self.tab_stops[col]);
                 self.x = next.unwrap_or(self.cols - 1);
             }
         } else {
-            for _ in steps..0 {
+            for _ in 0..count {
                 let prev = (0..self.x).rev().find(|&col| self.tab_stops[col]);
                 self.x = prev.unwrap_or(0);
             }
@@ -791,7 +792,7 @@ impl Perform for Screen {
             'F' => {
                 self.move_to(0, self.y.saturating_sub(n(0)));
             }
-            'G' | ` => self.move_to(n(0) - 1, self.y),
+            'G' | '\u{60}' => self.move_to(n(0) - 1, self.y),
             'd' => self.move_to_origin(self.x, n(0) - 1),
             'H' | 'f' => self.move_to_origin(n(1) - 1, n(0) - 1),
             'I' => self.tab(n(0) as i32), // CHT
@@ -898,17 +899,18 @@ impl Perform for Screen {
                 self.linefeed();
             }
             b'M' => {
+                self.wrap_pending = false;
                 if self.y == self.scroll_top {
                     self.scroll_down(1);
                 } else {
                     self.y = self.y.saturating_sub(1);
                 }
             }
-            b'7' => self.saved_cursor = (self.x, self.y),
-            b'8' => {
-                self.x = self.saved_cursor.0.min(self.cols - 1);
-                self.y = self.saved_cursor.1.min(self.rows - 1);
+            b'H' => { // HTS
+                self.tab_stops[self.x] = true;
             }
+            b'7' => self.save_cursor(), // DECSC
+            b'8' => self.restore_cursor(), // DECRC
             b'c' => {
                 let cols = self.cols;
                 let rows = self.rows;
