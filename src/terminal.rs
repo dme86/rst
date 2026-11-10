@@ -189,8 +189,8 @@ impl Screen {
             saved_cursor: CursorSnapshot {
                 x: 0,
                 y: 0,
-                fg: palette.foreground,
-                bg: palette.background,
+                fg: blank.fg,
+                bg: blank.bg,
                 style: TextStyle::default(),
                 origin_mode: false,
             },
@@ -318,7 +318,8 @@ impl Screen {
     }
 
     fn linefeed(&mut self) {
-        if self.y + 1 == self.scroll_bottom {
+        self.wrap_pending = false;
+        if self.y >= self.scroll_top && self.y + 1 == self.scroll_bottom {
             self.scroll_up(1);
         } else {
             self.y = (self.y + 1).min(self.rows - 1);
@@ -408,24 +409,60 @@ impl Screen {
             saved.x = saved.x.min(cols - 1);
             saved.y = saved.y.min(rows - 1);
         }
+        let previous_tab_width = self.tab_stops.len();
+        self.tab_stops.resize_with(cols, || false);
+        // New columns get conventional 8-cell tab stops; existing user
+        // customizations survive a resize just like st.
+        for col in previous_tab_width..cols {
+            self.tab_stops[col] = col != 0 && col % 8 == 0;
+        }
         self.cols = cols;
         self.rows = rows;
         self.x = self.x.min(cols - 1);
         self.y = self.y.min(rows - 1);
         self.scroll_top = 0;
         self.scroll_bottom = rows;
+        self.saved_cursor.x = self.saved_cursor.x.min(cols - 1);
+        self.saved_cursor.y = self.saved_cursor.y.min(rows - 1);
+        if let Some(snapshot) = self.saved_primary_cursor.as_mut() {
+            snapshot.x = snapshot.x.min(cols - 1);
+            snapshot.y = snapshot.y.min(rows - 1);
+        }
+        self.wrap_pending = false;
         self.view_offset = 0;
     }
 
     fn put_char(&mut self, ch: char) {
         let width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width == 0 || width > 2 {
-            // TODO: merge combining marks into a grapheme cluster.
+            // TODO: merge combining marks into grapheme clusters.
             return;
         }
+        // DECAWM wraps on the next printable glyph, not immediately after
+        // painting the last column (the delayed-wrap behavior from st).
+        if self.wrap_pending {
+            if self.auto_wrap {
+                self.x = 0;
+                self.linefeed();
+            }
+            self.wrap_pending = false;
+        }
         if self.x + width > self.cols {
-            self.x = 0;
-            self.linefeed();
+            if self.auto_wrap {
+                self.x = 0;
+                self.linefeed();
+            } else {
+                // Avoid writing half a double-width glyph at the right edge.
+                self.grid[self.y][self.cols - 1] = self.blank();
+                return;
+            }
+        }
+        if self.insert_mode {
+            let count = width.min(self.cols - self.x);
+            let blank = self.blank();
+            let row = &mut self.grid[self.y];
+            row.copy_within(self.x..self.cols - count, self.x + count);
+            row[self.x..self.x + count].fill(blank);
         }
         let (fg, bg) = self.ink_colors();
         self.grid[self.y][self.x] = Cell {
@@ -444,7 +481,12 @@ impl Screen {
                 style: self.style,
             };
         }
-        self.x += width;
+        if self.x + width == self.cols {
+            self.x = self.cols - 1;
+            self.wrap_pending = self.auto_wrap;
+        } else {
+            self.x += width;
+        }
     }
 
     fn erase_line(&mut self, mode: u16) {
