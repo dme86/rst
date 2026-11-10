@@ -942,6 +942,10 @@ impl Terminal {
 }
 
 #[cfg(test)]
+#[path = "vt_modes_tests.rs"]
+mod vt_modes_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
