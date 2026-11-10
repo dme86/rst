@@ -118,12 +118,24 @@ pub fn encode_key(
     key: &Key<&str>,
     physical: PhysicalKey,
     location: KeyLocation,
+    composed_text: Option<&str>,
     mods: ModifiersState,
     modes: KeyboardModes,
 ) -> Vec<u8> {
     // Super / Command is reserved for window-manager and app shortcuts.
     if mods.super_key() {
         return Vec::new();
+    }
+
+    // AltGr is often reported as Ctrl+Alt on European layouts. Let the
+    // platform's composed printable text take precedence over C0/Meta
+    // encoding, or AltGr+Q would become ESC NUL instead of '@'.
+    if mods.control_key() && mods.alt_key() {
+        if let (Key::Character(_), Some(text)) = (key, composed_text) {
+            if !text.is_empty() && text.chars().all(|ch| !ch.is_control()) {
+                return text.as_bytes().to_vec();
+            }
+        }
     }
 
     let modifier = modifier_parameter(mods);
