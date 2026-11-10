@@ -10,7 +10,7 @@ padding = 6
 
 [font]
 family = "0xProto Nerd Font"
-size = 15.0
+size = 16.5
 fallback = [
   "0xProto Nerd Font Mono",
   "JetBrainsMono Nerd Font",

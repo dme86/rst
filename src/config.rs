@@ -132,6 +132,13 @@ mod tests {
     }
 
     #[test]
+    fn bundled_default_font_size_matches_alacritty() {
+        let defaults: Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert_eq!(defaults.font.size, 16.5);
+    }
+
+    #[test]
     fn bundled_default_prefers_0xproto_regular() {
         let defaults: Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
