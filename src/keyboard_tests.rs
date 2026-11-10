@@ -5,6 +5,7 @@ fn named(key: NamedKey, mods: ModifiersState, modes: KeyboardModes) -> Vec<u8> {
         &Key::Named(key),
         PhysicalKey::Code(KeyCode::F1),
         KeyLocation::Standard,
+        None,
         mods,
         modes,
     )
@@ -15,6 +16,7 @@ fn text_key(s: &str, mods: ModifiersState) -> Vec<u8> {
         &Key::Character(s),
         PhysicalKey::Code(KeyCode::KeyA),
         KeyLocation::Standard,
+        None,
         mods,
         KeyboardModes::default(),
     )
@@ -130,6 +132,7 @@ fn application_keypad_uses_numpad_physical_identity_only() {
                 &Key::Character("7"),
                 PhysicalKey::Code(code),
                 KeyLocation::Numpad,
+                None,
                 ModifiersState::empty(),
                 app,
             ),
@@ -141,6 +144,7 @@ fn application_keypad_uses_numpad_physical_identity_only() {
             &Key::Character("7"),
             PhysicalKey::Code(KeyCode::Numpad7),
             KeyLocation::Numpad,
+            None,
             ModifiersState::empty(),
             KeyboardModes::default(),
         ),
@@ -163,4 +167,34 @@ fn control_meta_utf8_and_space() {
     assert_eq!(named(NamedKey::Space, ModifiersState::CONTROL, modes), b"\0");
     assert_eq!(named(NamedKey::Enter, ModifiersState::ALT, modes), b"\x1b\r");
     assert!(text_key("x", ModifiersState::SUPER).is_empty());
+}
+
+#[test]
+fn altgr_keeps_international_printable_characters() {
+    let modifiers = ModifiersState::CONTROL | ModifiersState::ALT;
+    for printable in ["@", "{", "[", "\\", "€"] {
+        assert_eq!(
+            encode_key(
+                &Key::Character(printable),
+                PhysicalKey::Code(KeyCode::KeyQ),
+                KeyLocation::Standard,
+                Some(printable),
+                modifiers,
+                KeyboardModes::default(),
+            ),
+            printable.as_bytes()
+        );
+    }
+    // A true Ctrl+Alt chord still encodes control bytes with the Meta prefix.
+    assert_eq!(
+        encode_key(
+            &Key::Character("c"),
+            PhysicalKey::Code(KeyCode::KeyC),
+            KeyLocation::Standard,
+            Some("\x03"),
+            modifiers,
+            KeyboardModes::default(),
+        ),
+        b"\x1b\x03"
+    );
 }
