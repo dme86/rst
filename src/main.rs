@@ -1,5 +1,6 @@
 mod config;
 mod keyboard;
+mod mouse;
 mod pty;
 mod render;
 mod terminal;
@@ -22,6 +23,7 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use crate::{
     config::Config,
     keyboard::{encode_key, KeyboardModes},
+    mouse::MouseReporter,
     pty::{PtySession, UserEvent},
     render::Renderer,
     terminal::{Palette, Terminal},
@@ -38,6 +40,7 @@ struct App {
     renderer: Option<Renderer>,
     modifiers: ModifiersState,
     mouse: (f64, f64),
+    mouse_reporter: MouseReporter,
     selection: Option<((usize, usize), (usize, usize))>,
     selecting: bool,
     next_cursor_blink: Instant,
@@ -416,8 +419,30 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(event),
+            WindowEvent::Focused(false) => {
+                // A mouse release may be lost when the window loses focus.
+                self.mouse_reporter.reset();
+                self.selecting = false;
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
+                let tracking = self.terminal.screen.mouse_tracking;
+                if tracking.enabled() && !self.modifiers.shift_key() {
+                    let at = self.cell_at_mouse();
+                    let report = self.mouse_reporter.motion(
+                        at,
+                        tracking,
+                        self.terminal.screen.mouse_sgr,
+                        self.modifiers,
+                    );
+                    if !report.is_empty() {
+                        self.pty.write(&report);
+                    }
+                    return;
+                }
+
+                // Shift bypasses application reporting, as in st, allowing
+                // ordinary local text selection even when tmux tracks the mouse.
                 if self.selecting {
                     let at = self.cell_at_mouse();
                     if let Some((start, _)) = self.selection {
@@ -428,26 +453,72 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            WindowEvent::MouseInput {
-                button: MouseButton::Left,
-                state,
-                ..
-            } => {
-                if state == ElementState::Pressed {
-                    let pos = self.cell_at_mouse();
-                    self.selection = Some((pos, pos));
-                    self.selecting = true;
-                } else if self.selecting {
-                    self.selecting = false;
-                    if self.config.clipboard.copy_on_select {
-                        self.copy_selection();
-                    }
+            WindowEvent::MouseInput { button, state, .. } => {
+                let tracking = self.terminal.screen.mouse_tracking;
+                let at = self.cell_at_mouse();
+                let report = self.mouse_reporter.button(
+                    button,
+                    state,
+                    at,
+                    tracking,
+                    self.terminal.screen.mouse_sgr,
+                    self.modifiers,
+                );
+                if !report.is_empty() {
+                    self.pty.write(&report);
                 }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+
+                if tracking.enabled() && !self.modifiers.shift_key() {
+                    // In reporting mode the child owns the click, not rst's
+                    // clipboard selection. A Shift-forced selection can
+                    // still be finished after the modifier is released.
+                    if self.selecting && button == MouseButton::Left && state == ElementState::Released {
+                        self.selecting = false;
+                        if self.config.clipboard.copy_on_select {
+                            self.copy_selection();
+                        }
+                    }
+                    return;
+                }
+
+                if button == MouseButton::Left {
+                    if state == ElementState::Pressed {
+                        self.selection = Some((at, at));
+                        self.selecting = true;
+                    } else if self.selecting {
+                        self.selecting = false;
+                        if self.config.clipboard.copy_on_select {
+                            self.copy_selection();
+                        }
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                let tracking = self.terminal.screen.mouse_tracking;
+                if tracking.enabled() && !self.modifiers.shift_key() {
+                    let cell_size = self.renderer.as_ref().map_or(
+                        (8, 18),
+                        |r| (r.cell_width, r.cell_height),
+                    );
+                    let at = self.cell_at_mouse();
+                    let report = self.mouse_reporter.scroll(
+                        delta,
+                        cell_size,
+                        at,
+                        tracking,
+                        self.terminal.screen.mouse_sgr,
+                        self.modifiers,
+                    );
+                    if !report.is_empty() {
+                        self.pty.write(&report);
+                    }
+                    return;
+                }
+                // Mouse reporting disabled or Shift held: retain rst's
+                // scrollback behavior on the primary screen.
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0) as i32,
                     MouseScrollDelta::PixelDelta(pos) => {
@@ -467,7 +538,14 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Output(bytes) => {
+                let previous_mouse_mode = self.terminal.screen.mouse_tracking;
                 self.terminal.advance(&bytes);
+                if self.terminal.screen.mouse_tracking != previous_mouse_mode {
+                    // Never carry held buttons or stale movement across a
+                    // TUI enabling/disabling DEC mouse reporting.
+                    self.mouse_reporter.reset();
+                    self.selecting = false;
+                }
                 let replies = self.terminal.screen.take_replies();
                 if !replies.is_empty() {
                     self.pty.write(&replies);
@@ -515,6 +593,7 @@ fn main() -> Result<()> {
         renderer: None,
         modifiers: ModifiersState::empty(),
         mouse: (0.0, 0.0),
+        mouse_reporter: MouseReporter::default(),
         selection: None,
         selecting: false,
         next_cursor_blink: Instant::now()
