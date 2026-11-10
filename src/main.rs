@@ -1,4 +1,5 @@
 mod config;
+mod keyboard;
 mod pty;
 mod render;
 mod terminal;
@@ -18,6 +19,7 @@ use winit::{
 
 use crate::{
     config::Config,
+    keyboard::{encode_key, KeyboardModes},
     pty::{PtySession, UserEvent},
     render::Renderer,
     terminal::{Palette, Terminal},
@@ -219,77 +221,35 @@ impl App {
             }
         }
 
-        let mut bytes: Vec<u8> = Vec::new();
-        match key {
-            // Space is NamedKey::Space on macOS and Wayland, not Key::Character(" ").
-            Key::Named(NamedKey::Space) => bytes.extend_from_slice(space_bytes(
-                self.modifiers.control_key(),
-                self.modifiers.alt_key(),
-                self.modifiers.super_key(),
-            )),
-            Key::Named(NamedKey::Enter) => bytes.push(b'\r'),
-            Key::Named(NamedKey::Tab) => bytes.push(b'\t'),
-            Key::Named(NamedKey::Backspace) => bytes.push(0x7f),
-            Key::Named(NamedKey::Escape) => bytes.push(0x1b),
-            Key::Named(NamedKey::ArrowUp) => bytes.extend_from_slice(
-                if self.terminal.screen.app_cursor { b"\x1bOA" } else { b"\x1b[A" },
-            ),
-            Key::Named(NamedKey::ArrowDown) => bytes.extend_from_slice(
-                if self.terminal.screen.app_cursor { b"\x1bOB" } else { b"\x1b[B" },
-            ),
-            Key::Named(NamedKey::ArrowRight) => bytes.extend_from_slice(
-                if self.terminal.screen.app_cursor { b"\x1bOC" } else { b"\x1b[C" },
-            ),
-            Key::Named(NamedKey::ArrowLeft) => bytes.extend_from_slice(
-                if self.terminal.screen.app_cursor { b"\x1bOD" } else { b"\x1b[D" },
-            ),
-            Key::Named(NamedKey::Home) => bytes.extend_from_slice(b"\x1b[H"),
-            Key::Named(NamedKey::End) => bytes.extend_from_slice(b"\x1b[F"),
-            Key::Named(NamedKey::Delete) => bytes.extend_from_slice(b"\x1b[3~"),
-            Key::Named(NamedKey::PageUp) => {
-                if self.modifiers.shift_key() {
-                    self.terminal.screen.scroll_view(self.terminal.screen.rows as i32);
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                    return;
+        // Shift+PageUp/Down remains the rst scrollback shortcut on the
+        // primary screen. In full-screen TUIs it must reach the child.
+        if self.modifiers == ModifiersState::SHIFT
+            && !self.terminal.screen.in_alternate_screen()
+        {
+            let scroll = match key {
+                Key::Named(NamedKey::PageUp) => Some(self.terminal.screen.rows as i32),
+                Key::Named(NamedKey::PageDown) => Some(-(self.terminal.screen.rows as i32)),
+                _ => None,
+            };
+            if let Some(lines) = scroll {
+                self.terminal.screen.scroll_view(lines);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
-                bytes.extend_from_slice(b"\x1b[5~");
+                return;
             }
-            Key::Named(NamedKey::PageDown) => {
-                if self.modifiers.shift_key() {
-                    self.terminal.screen.scroll_view(-(self.terminal.screen.rows as i32));
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                    return;
-                }
-                bytes.extend_from_slice(b"\x1b[6~");
-            }
-            Key::Character(text) if self.modifiers.control_key() => {
-                if let Some(c) = text.chars().next() {
-                    let c = c.to_ascii_lowercase();
-                    match c {
-                        'a'..='z' => bytes.push(c as u8 - b'a' + 1),
-                        ' ' | '@' => bytes.push(0),
-                        '[' => bytes.push(27),
-                        '\\' => bytes.push(28),
-                        ']' => bytes.push(29),
-                        '^' => bytes.push(30),
-                        '_' => bytes.push(31),
-                        '?' => bytes.push(127),
-                        _ => {}
-                    }
-                }
-            }
-            Key::Character(text) if !self.modifiers.super_key() => {
-                if self.modifiers.alt_key() {
-                    bytes.push(0x1b);
-                }
-                bytes.extend_from_slice(text.as_bytes());
-            }
-            _ => {}
         }
+
+        let bytes = encode_key(
+            &key,
+            event.physical_key,
+            event.location,
+            self.modifiers,
+            KeyboardModes {
+                application_cursor: self.terminal.screen.app_cursor,
+                application_keypad: self.terminal.screen.app_keypad,
+            },
+        );
         if !bytes.is_empty() {
             self.selection = None;
             self.terminal.screen.view_offset = 0;
@@ -298,8 +258,6 @@ impl App {
     }
 }
 
-// winit reports a space as a named key. Generate the same PTY bytes as a
-// printable character, including Ctrl+Space (NUL) and Alt+Space (ESC + space).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ZoomAction {
     In,
@@ -354,18 +312,6 @@ fn blink_step(
         (!visible, now + interval)
     } else {
         (visible, next)
-    }
-}
-
-fn space_bytes(control: bool, alt: bool, command: bool) -> &'static [u8] {
-    if command {
-        b""
-    } else if control {
-        b"\x00"
-    } else if alt {
-        b"\x1b "
-    } else {
-        b" "
     }
 }
 
@@ -648,23 +594,5 @@ mod keyboard_tests {
         assert_eq!(zoomed_font_size(6.0, 15.0, ZoomAction::Out), 6.0);
     }
 
-    #[test]
-    fn space_sends_ascii_space_to_pty() {
-        assert_eq!(space_bytes(false, false, false), b" ");
-    }
 
-    #[test]
-    fn ctrl_space_sends_nul() {
-        assert_eq!(space_bytes(true, false, false), b"\x00");
-    }
-
-    #[test]
-    fn alt_space_sends_escape_prefixed_space() {
-        assert_eq!(space_bytes(false, true, false), b"\x1b ");
-    }
-
-    #[test]
-    fn command_space_is_not_sent_to_shell() {
-        assert_eq!(space_bytes(false, false, true), b"");
-    }
 }
