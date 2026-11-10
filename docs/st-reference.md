@@ -51,9 +51,9 @@ vendor or translate upstream C source.
 
 ## SGR text styling (implemented)
 
-- Match upstream st's \`st.c::tsetattr\` flags: bold, faint, italic, underline,
+- Match upstream st's `st.c::tsetattr` flags: bold, faint, italic, underline,
   blink, reverse, invisible, struck and their selective reset codes.
-- Store \`TextStyle\` in each \`Cell\` so history, erase, insert/delete and
+- Store `TextStyle` in each `Cell` so history, erase, insert/delete and
   alternate-screen operations preserve the right properties. BCE erasures
   retain the effective background without inheriting text decorations.
 - Use real bold/italic font faces where available; synthesize missing styles
