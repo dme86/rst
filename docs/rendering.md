@@ -26,15 +26,17 @@ Background Color Erase has a regression test in `src/terminal.rs`.
 Nerd Font icons are Unicode private-use glyphs, not ordinary letterforms.
 Their rasterizer metrics can have different bearings and baselines from the
 primary text font. rst therefore calculates the non-transparent *ink bounds*
-of each private-use icon, centers that region vertically in the cell and
-scales it proportionally to the available space. A conservative amount of
+of each private-use icon, aligns its visible lower edge to the normal
+text baseline (measured with the primary font's lowercase 'x'), and scales
+it proportionally to the available space. A conservative amount of
 horizontal overflow is permitted only into immediately neighboring **blank
 cells of the same background color**. Regular letters are unchanged, and
 Powerline separators keep their full-cell vector rendering.
 
 This is a rendering/layout heuristic, not a general Unicode shaping solution.
 Tests cover supplemental private-use icons (including U+F10FE), visible-alpha
-bounds, centering and avoidance of collisions with neighboring text.
+bounds, baseline alignment, vertical clamping and avoidance of collisions
+with neighboring text.
 
 ## Known limits
 

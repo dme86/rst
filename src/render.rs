@@ -25,6 +25,8 @@ pub struct Renderer {
     pub cell_height: usize,
     pub padding: usize,
     ascent: i32,
+    // Bottom edge of a regular lowercase glyph, relative to a grid row.
+    text_ink_bottom: i32,
 }
 
 impl Renderer {
@@ -105,6 +107,13 @@ impl Renderer {
         let ascent = line
             .map(|line| line.ascent.ceil() as i32)
             .unwrap_or(font_size.ceil() as i32);
+        // Match icons to the visible lower edge of normal text, rather than
+        // the vertical centre of the entire terminal cell.  'x' has no
+        // descender and is a stable reference across monospace families.
+        // fontdue::Metrics::ymin is the bottom bearing from the baseline.
+        let text_ink_bottom = ascent
+            + (cell_height as i32 - font_size.ceil() as i32).max(0) / 2
+            - primary.metrics('x', font_size).ymin;
 
         Ok(Self {
             fonts,
@@ -116,6 +125,7 @@ impl Renderer {
             cell_height,
             padding: (padding as f64 * scale) as usize,
             ascent,
+            text_ink_bottom,
         })
     }
 
@@ -221,6 +231,7 @@ impl Renderer {
             + (self.cell_height as i32 - self.font_size.ceil() as i32).max(0) / 2;
         let slot_w = self.cell_width * cell.width as usize;
         let slot_h = self.cell_height;
+        let text_ink_bottom = self.text_ink_bottom;
         // The four classic Powerline separators are font-independent vector
         // shapes. This avoids the one-pixel seams of font rasterization.
         if matches!(cell.ch as u32, 0xe0b0..=0xe0b3) {
@@ -236,7 +247,7 @@ impl Renderer {
         let icon = is_nerd_icon(cell.ch);
         let ink = if icon { visible_ink_bounds(glyph) } else { None };
         let placement = if let Some(bounds) = ink {
-            place_icon(bounds, x, y, slot_w, slot_h, spill)
+            place_icon(bounds, x, y, slot_w, slot_h, spill, text_ink_bottom)
         } else {
             place_glyph(
                 &glyph.metrics,
@@ -364,9 +375,10 @@ fn icon_spill(
     )
 }
 
-/// Nerd Font icons should appear centered next to text even when their font
-/// baseline or glyph bearings differ dramatically from the primary font.
-/// Keep their aspect ratio and allow a modest scale-up, within safe padding.
+/// Nerd Font icons should sit on the visible lower edge of normal text,
+/// rather than in the vertical centre of the full grid cell. Font bearings
+/// vary between Nerd Fonts, so anchor only the rasterized ink rectangle.
+/// Keep their aspect ratio and allow a modest scale-up, within safe bounds.
 fn place_icon(
     ink: InkBounds,
     x: usize,
@@ -374,6 +386,7 @@ fn place_icon(
     cell_width: usize,
     cell_height: usize,
     spill: (usize, usize),
+    text_ink_bottom: i32,
 ) -> Placement {
     let available_width = cell_width + spill.0 + spill.1;
     let available_height = ((cell_height as f32 * 0.84).round() as usize)
@@ -387,9 +400,14 @@ fn place_icon(
     let right_limit = x.saturating_add(cell_width).saturating_add(spill.1);
     let ideal_x = x as i64 + (cell_width as i64 - width as i64) / 2;
     let actual_x = ideal_x.clamp(left_limit as i64, right_limit.saturating_sub(width) as i64);
+    // text_ink_bottom is relative to the row origin and exclusive:
+    // regular text and the icon now share a common visible bottom edge.
+    // Clamp to the cell to prevent overshooting into other rows.
+    let ideal_y = text_ink_bottom - height as i32;
+    let actual_y = ideal_y.clamp(0, (cell_height - height) as i32) as usize;
     Placement {
         x: actual_x as usize,
-        y: y + (cell_height - height) / 2,
+        y: y + actual_y,
         width,
         height,
     }
@@ -752,13 +770,23 @@ mod tests {
     }
 
     #[test]
-    fn icons_are_centered_independently_of_font_baseline() {
+    fn icons_align_to_text_ink_bottom_not_cell_center() {
         let bounds = InkBounds { x: 2, y: 4, width: 12, height: 12 };
-        let at = place_icon(bounds, 50, 100, 20, 30, (3, 3));
+        let at = place_icon(bounds, 50, 100, 20, 30, (3, 3), 26);
         assert_eq!(at.width, 19); // bounded to 1.6x source ink
         assert_eq!(at.height, 19);
-        assert_eq!(at.y, 105);
+        assert_eq!(at.y, 107); // bottom = 126, matching text lower edge
+        assert_eq!(at.y + at.height, 126);
         assert!(at.x >= 47 && at.x + at.width <= 73);
+    }
+
+    #[test]
+    fn icon_baseline_is_clamped_inside_cell() {
+        let bounds = InkBounds { x: 0, y: 0, width: 8, height: 8 };
+        let too_high = place_icon(bounds, 5, 10, 20, 25, (0, 0), -10);
+        assert_eq!(too_high.y, 10);
+        let too_low = place_icon(bounds, 5, 10, 20, 25, (0, 0), 50);
+        assert_eq!(too_low.y + too_low.height, 35);
     }
 
     #[test]
