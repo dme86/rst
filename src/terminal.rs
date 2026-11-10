@@ -737,13 +737,21 @@ impl Perform for Screen {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            b'\r' => self.x = 0,
-            b'\n' | 0x0b | 0x0c => self.linefeed(),
-            0x08 => self.x = self.x.saturating_sub(1),
-            b'\t' => {
-                let next = (self.x / 8 + 1) * 8;
-                self.x = next.min(self.cols - 1);
+            b'\r' => {
+                self.x = 0;
+                self.wrap_pending = false;
             }
+            b'\n' | 0x0b | 0x0c => {
+                if self.newline_mode {
+                    self.x = 0;
+                }
+                self.linefeed();
+            }
+            0x08 => {
+                self.x = self.x.saturating_sub(1);
+                self.wrap_pending = false;
+            }
+            b'\t' => self.tab(1),
             _ => {}
         }
     }
@@ -766,25 +774,33 @@ impl Perform for Screen {
             }
             return;
         }
+        if action == 'h' || action == 'l' {
+            for mode in values.iter().copied() {
+                self.set_standard_mode(mode, action == 'h');
+            }
+            return;
+        }
         match action {
-            'A' => self.y = self.y.saturating_sub(n(0)),
-            'B' => self.y = (self.y + n(0)).min(self.rows - 1),
-            'C' => self.x = (self.x + n(0)).min(self.cols - 1),
-            'D' => self.x = self.x.saturating_sub(n(0)),
+            'A' => self.relative_y(-(n(0) as i32)),
+            'B' | 'e' => self.relative_y(n(0) as i32),
+            'C' | 'a' => self.move_to(self.x.saturating_add(n(0)), self.y),
+            'D' => self.move_to(self.x.saturating_sub(n(0)), self.y),
             'E' => {
-                self.y = (self.y + n(0)).min(self.rows - 1);
-                self.x = 0;
+                self.move_to(0, self.y.saturating_add(n(0)));
             }
             'F' => {
-                self.y = self.y.saturating_sub(n(0));
-                self.x = 0;
+                self.move_to(0, self.y.saturating_sub(n(0)));
             }
-            'G' => self.x = (n(0) - 1).min(self.cols - 1),
-            'd' => self.y = (n(0) - 1).min(self.rows - 1),
-            'H' | 'f' => {
-                self.y = (n(0) - 1).min(self.rows - 1);
-                self.x = (n(1) - 1).min(self.cols - 1);
-            }
+            'G' | ` => self.move_to(n(0) - 1, self.y),
+            'd' => self.move_to_origin(self.x, n(0) - 1),
+            'H' | 'f' => self.move_to_origin(n(1) - 1, n(0) - 1),
+            'I' => self.tab(n(0) as i32), // CHT
+            'Z' => self.tab(-(n(0) as i32)), // CBT
+            'g' => match values.first().copied().unwrap_or(0) {
+                0 => self.tab_stops[self.x] = false,
+                3 => self.tab_stops.fill(false),
+                _ => {}
+            },
             'J' => self.erase_display(values.first().copied().unwrap_or(0)),
             'K' => self.erase_line(values.first().copied().unwrap_or(0)),
             'm' => self.sgr(if values.is_empty() { &[0] } else { &values }),
@@ -800,16 +816,13 @@ impl Perform for Screen {
                 if top < bottom {
                     self.scroll_top = top;
                     self.scroll_bottom = bottom;
-                    self.x = 0;
-                    self.y = 0;
+                    self.home_cursor();
                 }
             }
-            's' => self.saved_cursor = (self.x, self.y),
-            'u' => {
-                self.x = self.saved_cursor.0.min(self.cols - 1);
-                self.y = self.saved_cursor.1.min(self.rows - 1);
-            }
+            's' => self.save_cursor(),
+            'u' => self.restore_cursor(),
             'P' => {
+                self.wrap_pending = false;
                 let x = self.x.min(self.cols - 1);
                 let blank = self.blank();
                 let count = n(0).min(self.cols - x);
@@ -818,6 +831,7 @@ impl Perform for Screen {
                 line[self.cols - count..].fill(blank);
             }
             '@' => {
+                self.wrap_pending = false;
                 let x = self.x.min(self.cols - 1);
                 let blank = self.blank();
                 let count = n(0).min(self.cols - x);
@@ -826,12 +840,14 @@ impl Perform for Screen {
                 line[x..x + count].fill(blank);
             }
             'X' => {
+                self.wrap_pending = false;
                 let blank = self.blank();
                 let x = self.x.min(self.cols - 1);
                 let end = (x + n(0)).min(self.cols);
                 self.grid[self.y][x..end].fill(blank);
             }
             'L' => {
+                self.wrap_pending = false;
                 if (self.scroll_top..self.scroll_bottom).contains(&self.y) {
                     for _ in 0..n(0).min(self.scroll_bottom - self.y) {
                         self.grid.remove(self.scroll_bottom - 1);
@@ -841,6 +857,7 @@ impl Perform for Screen {
                 }
             }
             'M' => {
+                self.wrap_pending = false;
                 if (self.scroll_top..self.scroll_bottom).contains(&self.y) {
                     for _ in 0..n(0).min(self.scroll_bottom - self.y) {
                         self.grid.remove(self.y);
@@ -851,9 +868,16 @@ impl Perform for Screen {
             }
             'n' => match values.first().copied().unwrap_or(0) {
                 5 => self.replies.extend_from_slice(b"\x1b[0n"),
-                6 => self
-                    .replies
-                    .extend_from_slice(format!("\x1b[{};{}R", self.y + 1, self.x + 1).as_bytes()),
+                6 => {
+                    let reported_y = if self.origin_mode {
+                        self.y - self.scroll_top + 1
+                    } else {
+                        self.y + 1
+                    };
+                    self.replies.extend_from_slice(
+                        format!("\x1b[{};{}R", reported_y, self.x + 1).as_bytes()
+                    );
+                }
                 _ => {}
             },
             'c' => self.replies.extend_from_slice(b"\x1b[?1;2c"),
