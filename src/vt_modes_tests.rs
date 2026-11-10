@@ -259,3 +259,12 @@ fn cursor_movement_cancels_pending_wrap_but_sgr_does_not() {
     assert_eq!(t.screen.y, 0);
     assert!(!t.screen.wrap_pending);
 }
+
+#[test]
+fn dec_saved_cursor_preserves_deferred_wrap_at_right_margin() {
+    let mut t = term(3, 2);
+    t.advance(b"abc\x1b7\r\x1b8Z");
+    assert_eq!(text_row(&t, 0), "abc");
+    assert_eq!(t.screen.grid[1][0].ch, 'Z');
+    assert_eq!((t.screen.x, t.screen.y), (1, 1));
+}
