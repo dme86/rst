@@ -7,9 +7,14 @@ rows = 28
 padding = 8
 
 [font]
-family = "JetBrainsMono Nerd Font"
+family = "0xProto Nerd Font"
 size = 15.0
-fallback = ["Menlo", "Monaco", "Symbols Nerd Font Mono", "DejaVu Sans Mono"]
+fallback = [
+  "0xProto Nerd Font Mono",
+  "JetBrainsMono Nerd Font",
+  "Symbols Nerd Font Mono",
+  "Menlo", "Monaco", "DejaVu Sans Mono",
+]
 
 [cursor]
 style = "block"

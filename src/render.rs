@@ -17,6 +17,9 @@ struct Glyph {
 pub struct Renderer {
     fonts: Vec<Font>,
     glyphs: HashMap<(usize, char), Glyph>,
+    // Only used when RST_DEBUG_FONTS=1 to avoid repeatedly reporting a codepoint.
+    missing_glyphs: HashSet<char>,
+    debug_fonts: bool,
     font_size: f32,
     pub cell_width: usize,
     pub cell_height: usize,
@@ -29,7 +32,9 @@ impl Renderer {
         let mut db = Database::new();
         db.load_system_fonts();
         let mut fonts = Vec::new();
+        let mut loaded = Vec::new();
         let mut seen = HashSet::new();
+        let debug_fonts = std::env::var_os("RST_DEBUG_FONTS").is_some();
 
         for family in std::iter::once(&config.family).chain(config.fallback.iter()) {
             if !seen.insert(family.to_lowercase()) {
@@ -53,10 +58,14 @@ impl Renderer {
                 .flatten()
             }) {
                 fonts.push(font);
+                loaded.push(family.to_string());
+            } else if debug_fonts {
+                eprintln!("rst: font family not available: {family}");
             }
         }
 
-        if fonts.is_empty() {
+        // Always include the system monospace face as a final fallback.
+        {
             let query = Query {
                 families: &[Family::Monospace],
                 ..Query::default()
@@ -75,7 +84,12 @@ impl Renderer {
                 .flatten()
             }) {
                 fonts.push(font);
+                loaded.push("system monospace".to_string());
             }
+        }
+
+        if debug_fonts {
+            eprintln!("rst: available font chain: {}", loaded.join(" -> "));
         }
 
         let primary = fonts
@@ -95,6 +109,8 @@ impl Renderer {
         Ok(Self {
             fonts,
             glyphs: HashMap::new(),
+            missing_glyphs: HashSet::new(),
+            debug_fonts,
             font_size,
             cell_width,
             cell_height,
@@ -104,11 +120,14 @@ impl Renderer {
     }
 
     fn glyph(&mut self, ch: char) -> &Glyph {
-        let index = self
-            .fonts
-            .iter()
-            .position(|font| font.has_glyph(ch))
-            .unwrap_or(0);
+        let matched = self.fonts.iter().position(|font| font.has_glyph(ch));
+        if matched.is_none()
+            && self.debug_fonts
+            && self.missing_glyphs.insert(ch)
+        {
+            eprintln!("rst: missing glyph U+{:04X} ({:?}) in configured fonts", ch as u32, ch);
+        }
+        let index = matched.unwrap_or(0);
         let font = &self.fonts[index];
         let size = self.font_size;
         self.glyphs.entry((index, ch)).or_insert_with(|| {

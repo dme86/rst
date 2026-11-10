@@ -113,6 +113,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bundled_default_prefers_0xproto_regular() {
+        let defaults: Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert_eq!(defaults.font.family, "0xProto Nerd Font");
+        assert!(defaults.font.fallback.iter().any(|name| name == "Symbols Nerd Font Mono"));
+    }
+
+    #[test]
     fn partial_configuration_inherits_defaults() {
         let mut defaults: toml::Value =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
