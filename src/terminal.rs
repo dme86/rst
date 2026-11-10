@@ -116,12 +116,33 @@ impl Screen {
         }
     }
 
+    // Background Color Erase (BCE): an erased cell uses the *current* SGR
+    // background, not the initial palette background. tmux relies on this
+    // for coloured status lines and clear-to-end-of-line sequences.
     fn blank(&self) -> Cell {
+        let (fg, bg) = self.ink_colors();
         Cell {
             ch: ' ',
             width: 1,
-            fg: self.palette.foreground,
-            bg: self.palette.background,
+            fg,
+            bg,
+        }
+    }
+
+    fn ink_colors(&self) -> (u32, u32) {
+        let bright_fg = if self.bold {
+            self.palette.ansi[..8]
+                .iter()
+                .position(|&color| color == self.fg)
+                .map(|index| self.palette.ansi[index + 8])
+                .unwrap_or(self.fg)
+        } else {
+            self.fg
+        };
+        if self.inverse {
+            (self.bg, bright_fg)
+        } else {
+            (bright_fg, self.bg)
         }
     }
 
@@ -225,20 +246,7 @@ impl Screen {
             self.x = 0;
             self.linefeed();
         }
-        let bright_fg = if self.bold {
-            self.palette.ansi[..8]
-                .iter()
-                .position(|&color| color == self.fg)
-                .map(|index| self.palette.ansi[index + 8])
-                .unwrap_or(self.fg)
-        } else {
-            self.fg
-        };
-        let (fg, bg) = if self.inverse {
-            (self.bg, bright_fg)
-        } else {
-            (bright_fg, self.bg)
-        };
+        let (fg, bg) = self.ink_colors();
         self.grid[self.y][self.x] = Cell {
             ch,
             width: width as u8,
@@ -621,6 +629,16 @@ mod tests {
         term.advance(b"hello\rX\x1b[2;4H!");
         assert_eq!(term.screen.grid[0][0].ch, 'X');
         assert_eq!(term.screen.grid[1][3].ch, '!');
+    }
+
+    #[test]
+    fn background_color_erase_preserves_active_background() {
+        let mut term = terminal(10, 3);
+        term.advance(b"\x1b[48;2;12;34;56m\x1b[2K");
+        assert_eq!(term.screen.grid[0][0].bg, 0x0c2238);
+        assert_eq!(term.screen.grid[0][9].bg, 0x0c2238);
+        term.advance(b"\x1b[0m\x1b[2;1H\x1b[2K");
+        assert_eq!(term.screen.grid[1][0].bg, term.screen.palette.background);
     }
 
     #[test]
