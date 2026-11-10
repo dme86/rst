@@ -49,6 +49,21 @@ vendor or translate upstream C source.
 - Protocol byte vectors and behavior checks live in `src/mouse_tests.rs`
   and the terminal unit tests.
 
+## SGR text styling (implemented)
+
+- Match upstream st's `st.c::tsetattr` flags: bold, faint, italic, underline,
+  blink, reverse, invisible, struck and their selective reset codes.
+- Store `TextStyle` in each `Cell` so history, erase, insert/delete and
+  alternate-screen operations preserve the right properties. BCE erasures
+  retain the effective background without inheriting text decorations.
+- Use real bold/italic font faces where available; synthesize missing styles
+  without adding font dependencies. Draw underline and strike across spaces
+  and apply faint ink with background-aware blending.
+- SGR 5/6 text blinking has its own event-loop deadline (800 ms), independent
+  of the cursor and without a continuous redraw loop.
+- Unit tests cover state transitions, selective resets, BCE, color interaction,
+  pixel decorations and blink suppression.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.

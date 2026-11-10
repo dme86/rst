@@ -85,6 +85,35 @@ blink_interval_ms = 700
 Set `blink = false` to keep the cursor steady, or adjust
 `blink_interval_ms` between 100 and 3000.
 
+### SGR text attributes (st compatibility)
+
+rst now stores SGR styling **per terminal cell** (including scrollback and
+alternate-screen content) and renders the text attributes supported by vanilla
+st. Multiple SGR parameters can be combined in one escape sequence.
+
+| SGR | Text attribute | Reset |
+| --- | --- | --- |
+| 1 | Bold (font face + bright ANSI colors where applicable) | 22 |
+| 2 | Faint/dim text | 22 |
+| 3 | Italic | 23 |
+| 4 | Underline (including spaces) | 24 |
+| 5 / 6 | Slow / rapid blink (both use st-style text blink) | 25 |
+| 7 | Reverse foreground/background | 27 |
+| 8 | Invisible/hidden glyphs | 28 |
+| 9 | Strikethrough (including spaces) | 29 |
+| 0 or empty | Reset all attributes and default colors | — |
+
+Truecolor, indexed colors and background-color erase are retained. Installed
+Bold, Italic and Bold Italic font faces are preferred; if unavailable, rst
+applies a lightweight synthetic fallback without changing terminal cell
+dimensions. The blink timer is independent of cursor blinking and sleeps when
+no visible text requires animation.
+
+For a quick check: `printf '\\033[1;3;4mBold italic underlined\\033[0m\\n'`.
+The corresponding state and rendering tests are in `src/terminal.rs` and
+`src/render.rs`. Extended SGR underline styles/colors and font ligatures are
+outside vanilla st parity and remain future work.
+
 ### Keyboard compatibility
 
 rst sends the traditional st/xterm keyboard sequences for F1–F12 (plus

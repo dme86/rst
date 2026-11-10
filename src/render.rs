@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use fontdb::{Database, Family, Query};
+use fontdb::{Database, Family, Query, Style, Weight};
 use fontdue::{Font, FontSettings, Metrics};
 
 use crate::{
     config::FontConfig,
-    terminal::{Cell, Screen},
+    terminal::{Cell, Screen, TextStyle},
 };
 
 struct Glyph {
@@ -14,9 +14,47 @@ struct Glyph {
     bitmap: Vec<u8>,
 }
 
+/// Pick a real bold/italic font face when the installed family provides it.
+/// If a family has no such face, the draw stage synthesizes the missing
+/// attribute rather than silently rendering a regular glyph.
+fn load_style_face(
+    db: &Database,
+    families: &[Family<'_>],
+    bold: bool,
+    italic: bool,
+) -> Option<Font> {
+    let query = Query {
+        families,
+        weight: if bold { Weight::BOLD } else { Weight::NORMAL },
+        style: if italic { Style::Italic } else { Style::Normal },
+        ..Query::default()
+    };
+    let id = db.query(&query)?;
+    let face = db.face(id)?;
+    if bold && face.weight.0 < 600 {
+        return None;
+    }
+    if italic && face.style == Style::Normal {
+        return None;
+    }
+    db.with_face_data(id, |data, index| {
+        Font::from_bytes(
+            data.to_vec(),
+            FontSettings {
+                collection_index: index,
+                ..FontSettings::default()
+            },
+        )
+        .ok()
+    })
+    .flatten()
+}
+
 pub struct Renderer {
     fonts: Vec<Font>,
-    glyphs: HashMap<(usize, char), Glyph>,
+    // For each regular fallback face: bold, italic, bold-italic variants.
+    styled_fonts: Vec<[Option<Font>; 3]>,
+    glyphs: HashMap<(usize, u8, char), Glyph>,
     // Only used when RST_DEBUG_FONTS=1 to avoid repeatedly reporting a codepoint.
     missing_glyphs: HashSet<char>,
     debug_fonts: bool,
@@ -34,6 +72,7 @@ impl Renderer {
         let mut db = Database::new();
         db.load_system_fonts();
         let mut fonts = Vec::new();
+        let mut styled_fonts = Vec::new();
         let mut loaded = Vec::new();
         let mut seen = HashSet::new();
         let debug_fonts = std::env::var_os("RST_DEBUG_FONTS").is_some();
@@ -59,6 +98,12 @@ impl Renderer {
                 })
                 .flatten()
             }) {
+                let family_query = [Family::Name(family)];
+                styled_fonts.push([
+                    load_style_face(&db, &family_query, true, false),
+                    load_style_face(&db, &family_query, false, true),
+                    load_style_face(&db, &family_query, true, true),
+                ]);
                 fonts.push(font);
                 loaded.push(family.to_string());
             } else if debug_fonts {
@@ -85,6 +130,12 @@ impl Renderer {
                 })
                 .flatten()
             }) {
+                let family_query = [Family::Monospace];
+                styled_fonts.push([
+                    load_style_face(&db, &family_query, true, false),
+                    load_style_face(&db, &family_query, false, true),
+                    load_style_face(&db, &family_query, true, true),
+                ]);
                 fonts.push(font);
                 loaded.push("system monospace".to_string());
             }
@@ -103,6 +154,7 @@ impl Renderer {
 
         Ok(Self {
             fonts,
+            styled_fonts,
             glyphs: HashMap::new(),
             missing_glyphs: HashSet::new(),
             debug_fonts,
@@ -136,21 +188,46 @@ impl Renderer {
         self.glyphs.clear();
     }
 
-    fn glyph(&mut self, ch: char) -> &Glyph {
+    /// Returns bitmap plus whether bold / italic should be synthesized.
+    /// Style choice is cached independently to avoid mixing glyph variants.
+    fn glyph(&mut self, ch: char, style: TextStyle) -> (&Glyph, bool, bool) {
         let matched = self.fonts.iter().position(|font| font.has_glyph(ch));
-        if matched.is_none()
-            && self.debug_fonts
-            && self.missing_glyphs.insert(ch)
-        {
+        if matched.is_none() && self.debug_fonts && self.missing_glyphs.insert(ch) {
             eprintln!("rst: missing glyph U+{:04X} ({:?}) in configured fonts", ch as u32, ch);
         }
         let index = matched.unwrap_or(0);
-        let font = &self.fonts[index];
+        let bold = style.contains(TextStyle::BOLD);
+        let italic = style.contains(TextStyle::ITALIC);
+        let candidate_variants: &[u8] = match (bold, italic) {
+            (true, true) => &[3, 2, 1],
+            (true, false) => &[1],
+            (false, true) => &[2],
+            (false, false) => &[],
+        };
+        let variant = candidate_variants
+            .iter()
+            .copied()
+            .find(|&variant| {
+                self.styled_fonts[index][variant as usize - 1]
+                    .as_ref()
+                    .is_some_and(|font| font.has_glyph(ch))
+            })
+            .unwrap_or(0);
+        let face = if variant == 0 {
+            &self.fonts[index]
+        } else {
+            self.styled_fonts[index][variant as usize - 1]
+                .as_ref()
+                .expect("style variant was checked")
+        };
+        let synth_bold = bold && variant != 1 && variant != 3;
+        let synth_italic = italic && variant != 2 && variant != 3;
         let size = self.font_size;
-        self.glyphs.entry((index, ch)).or_insert_with(|| {
-            let (metrics, bitmap) = font.rasterize(ch, size);
+        let glyph = self.glyphs.entry((index, variant, ch)).or_insert_with(|| {
+            let (metrics, bitmap) = face.rasterize(ch, size);
             Glyph { metrics, bitmap }
-        })
+        });
+        (glyph, synth_bold, synth_italic)
     }
 
     /// Draw all backgrounds first, then all glyphs. Painting each cell's
@@ -208,16 +285,29 @@ impl Renderer {
                 break;
             }
             for (col, &cell) in screen.display_row(row).iter().enumerate() {
-                if cell.width == 0 || cell.ch == ' ' {
+                if cell.width == 0 {
                     continue;
                 }
                 let x = self.padding + col * self.cell_width;
                 if x >= width {
                     break;
                 }
-                let (fg, _) = cell_colors(screen, row, col, cell, selection);
-                let spill = icon_spill(screen, row, col, cell, selection, self.cell_width);
-                self.draw_glyph(pixels, width, height, x, y, cell, fg, spill);
+                if !cell.style.visible(screen.text_blink_on) {
+                    continue;
+                }
+                let (fg, bg) = cell_colors(screen, row, col, cell, selection);
+                let ink = effective_ink_color(cell.style, fg, bg);
+                if cell.ch != ' ' {
+                    let spill = icon_spill(screen, row, col, cell, selection, self.cell_width);
+                    self.draw_glyph(pixels, width, height, x, y, cell, ink, spill);
+                }
+                // Underline and strikethrough continue through spaces, just
+                // like st. Draw after glyphs so the decoration is visible.
+                paint_decorations(
+                    pixels, width, height, x, y,
+                    self.cell_width * cell.width as usize,
+                    self.cell_height, self.ascent, self.font_size, cell.style, ink,
+                );
             }
         }
     }
@@ -245,7 +335,7 @@ impl Renderer {
             draw_powerline(pixels, width, height, x, y, slot_w, slot_h, cell.ch, fg);
             return;
         }
-        let glyph = self.glyph(cell.ch);
+        let (glyph, synthetic_bold, synthetic_italic) = self.glyph(cell.ch, cell.style);
         if glyph.metrics.width == 0 || glyph.metrics.height == 0 {
             return;
         }
@@ -272,9 +362,17 @@ impl Renderer {
                 break;
             }
             for dx in 0..placement.width {
-                let target_x = placement.x + dx;
-                if target_x >= width {
-                    break;
+                // Prefer true font variants; if the family has no Italic
+                // face, lightly shear the bitmap without touching the cell
+                // geometry or the fixed-width terminal grid.
+                let slant = if synthetic_italic && ink.is_none() {
+                    (placement.height.saturating_sub(dy + 1) / 7).min(3)
+                } else {
+                    0
+                };
+                let target_x = placement.x + dx + slant;
+                if target_x >= width || (synthetic_italic && target_x >= x + slot_w) {
+                    continue;
                 }
                 let alpha = match ink {
                     Some(bounds) => sample_glyph_rect(
@@ -289,11 +387,62 @@ impl Renderer {
                 // Blend against the real framebuffer pixel so an overhanging
                 // glyph cannot accidentally re-introduce its own background.
                 pixels[index] = blend(fg, pixels[index], alpha);
+                if synthetic_bold && target_x + 1 < width && target_x + 1 < x + slot_w {
+                    // A one-pixel emboldening pass when no real bold face
+                    // exists. Keep the extra stroke inside the cell.
+                    let next = index + 1;
+                    pixels[next] = blend(fg, pixels[next], alpha);
+                }
             }
         }
     }
 }
 
+
+/// Faint is drawn by blending foreground into the *effective* background,
+/// including selection or cursor highlighting; no opaque dark overlay.
+fn effective_ink_color(style: TextStyle, fg: u32, bg: u32) -> u32 {
+    if style.contains(TextStyle::FAINT) {
+        blend(fg, bg, 128)
+    } else {
+        fg
+    }
+}
+
+/// Decorations are independent of the glyph bitmap. In particular underlines
+/// must continue across spaces and remain visible on missing-glyph cells.
+#[allow(clippy::too_many_arguments)]
+fn paint_decorations(
+    pixels: &mut [u32],
+    stride: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    cell_height: usize,
+    ascent: i32,
+    font_size: f32,
+    style: TextStyle,
+    color: u32,
+) {
+    if cell_height == 0 || width == 0 || (!style.contains(TextStyle::UNDERLINE)
+        && !style.contains(TextStyle::STRUCK))
+    {
+        return;
+    }
+    let thickness = ((font_size / 18.0).round() as usize).clamp(1, 3).min(cell_height);
+    let vertical_offset = ((cell_height as i32 - font_size.ceil() as i32).max(0)) / 2;
+    let baseline = (ascent + vertical_offset).clamp(0, cell_height as i32 - 1);
+    let max_y = cell_height - thickness;
+    if style.contains(TextStyle::UNDERLINE) {
+        let at = (baseline + 1).max(0) as usize;
+        rect(pixels, stride, height, x, y + at.min(max_y), width, thickness, color);
+    }
+    if style.contains(TextStyle::STRUCK) {
+        let at = (baseline - ascent / 3).max(0) as usize;
+        rect(pixels, stride, height, x, y + at.min(max_y), width, thickness, color);
+    }
+}
 
 /// Cell geometry derived from the primary face for a chosen pixel size.
 /// Used identically at initialization and when changing the font size.
@@ -900,7 +1049,7 @@ mod tests {
         let font_count = renderer.fonts.len();
         let original_height = renderer.cell_height;
         let original_size = renderer.font_size;
-        renderer.glyph('M');
+        renderer.glyph('M', TextStyle::default());
         assert!(!renderer.glyphs.is_empty());
 
         renderer.set_font_size(config.font.size + 3.0, 1.0);
@@ -910,7 +1059,7 @@ mod tests {
         assert!(renderer.glyphs.is_empty());
 
         // Same-size calls should not invalidate freshly rasterized glyphs.
-        renderer.glyph('M');
+        renderer.glyph('M', TextStyle::default());
         renderer.set_font_size(config.font.size + 3.0, 1.0);
         assert!(!renderer.glyphs.is_empty());
     }
@@ -920,4 +1069,81 @@ mod tests {
         assert_eq!(blend(0xffffff, 0, 0), 0);
         assert_eq!(blend(0xffffff, 0, 255), 0xffffff);
     }
+
+    fn style_from_sgr(sequence: &[u8]) -> TextStyle {
+        let fixture = test_screen();
+        let mut term = crate::terminal::Terminal::new(2, 2, 0, fixture.palette);
+        term.advance(sequence);
+        term.screen.grid[0][0].style
+    }
+
+    #[test]
+    fn faint_text_blends_foreground_with_effective_background() {
+        let faint = style_from_sgr(b"\x1b[2mX");
+        assert_eq!(effective_ink_color(faint, 0xffffff, 0), blend(0xffffff, 0, 128));
+        let plain = style_from_sgr(b"X");
+        assert_eq!(effective_ink_color(plain, 0xffffff, 0), 0xffffff);
+        assert_ne!(
+            effective_ink_color(faint, 0xffffff, 0x112233),
+            effective_ink_color(faint, 0xffffff, 0),
+        );
+    }
+
+    #[test]
+    fn underline_and_strike_draw_independent_horizontal_rules() {
+        let style = style_from_sgr(b"\x1b[4;9mX");
+        let mut pixels = vec![0u32; 16 * 16];
+        paint_decorations(
+            &mut pixels, 16, 16, 0, 0, 8, 12, 9, 12.0, style, 0xabcdef,
+        );
+        // Baseline at 9; strike at 9 - 9/3 = 6, underline at 10.
+        for col in 0..8 {
+            assert_eq!(pixels[6 * 16 + col], 0xabcdef);
+            assert_eq!(pixels[10 * 16 + col], 0xabcdef);
+        }
+        assert_eq!(pixels[5 * 16 + 3], 0);
+        assert_eq!(pixels[11 * 16 + 3], 0);
+        assert_eq!(pixels[6 * 16 + 8], 0);
+    }
+
+    #[test]
+    fn decorations_are_clipped_to_their_own_cell() {
+        let style = style_from_sgr(b"\x1b[4;9mX");
+        let mut pixels = vec![0u32; 11 * 7];
+        paint_decorations(&mut pixels, 11, 7, 8, 3, 6, 4, 50, 28.0, style, 0xff00ff);
+        assert!(pixels.iter().any(|&pixel| pixel == 0xff00ff));
+        for row in 0..7 {
+            assert!(pixels[row * 11..row * 11 + 8].iter().all(|&pixel| pixel == 0));
+        }
+    }
+
+    #[test]
+    fn hidden_and_blinking_attributes_suppress_glyph_and_decoration() {
+        let hidden = style_from_sgr(b"\x1b[8;4mX");
+        let blink = style_from_sgr(b"\x1b[5;9mX");
+        assert!(!hidden.visible(true));
+        assert!(!hidden.visible(false));
+        assert!(blink.visible(true));
+        assert!(!blink.visible(false));
+    }
+
+    #[test]
+    fn font_variant_cache_is_invalidated_on_zoom() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else {
+            return; // Host with no discoverable monospace fonts.
+        };
+        let normal = TextStyle::default();
+        let italic = style_from_sgr(b"\x1b[3mM");
+        let bold = style_from_sgr(b"\x1b[1mM");
+        renderer.glyph('M', normal);
+        renderer.glyph('M', italic);
+        renderer.glyph('M', bold);
+        assert!(!renderer.glyphs.is_empty());
+        assert_eq!(renderer.fonts.len(), renderer.styled_fonts.len());
+        renderer.set_font_size(config.font.size + 2.0, 1.0);
+        assert!(renderer.glyphs.is_empty());
+    }
+
 }
