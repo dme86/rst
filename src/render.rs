@@ -528,7 +528,23 @@ mod tests {
         let config: crate::config::Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
         let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
-        Screen::new(2, 2, 0, palette)
+        // Background-only tests must not accidentally paint the initial
+        // visible cursor at (0, 0) over the fixture's cell background.
+        let mut screen = Screen::new(2, 2, 0, palette);
+        screen.show_cursor = false;
+        screen
+    }
+
+    #[test]
+    fn cursor_background_overrides_the_cell_background_when_visible() {
+        let mut screen = test_screen();
+        screen.show_cursor = true;
+        screen.grid[0][0].bg = 0x111111;
+        let mut pixels = vec![0; 13 * 10];
+        paint_backgrounds(&mut pixels, 13, 10, &screen, 5, 4, 0, None);
+        assert_eq!(pixels[0], screen.palette.cursor);
+        // Only the actual cursor cell should use the cursor color.
+        assert_eq!(pixels[5], screen.palette.background);
     }
 
     #[test]
