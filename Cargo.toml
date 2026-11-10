@@ -13,7 +13,7 @@ fontdb = "0.24"
 fontdue = "0.9"
 portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
-softbuffer = "0.4.6"
+softbuffer = { version = "0.4.6", default-features = false, features = ["wayland"] }
 toml = "0.9"
 unicode-width = "0.2"
 vte = "0.15"

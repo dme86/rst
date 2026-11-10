@@ -27,7 +27,7 @@ impl PtySession {
         proxy: EventLoopProxy<UserEvent>,
     ) -> Result<Self> {
         let system = native_pty_system();
-        let mut pair = system.openpty(PtySize {
+        let pair = system.openpty(PtySize {
             rows: rows.min(u16::MAX as usize) as u16,
             cols: cols.min(u16::MAX as usize) as u16,
             pixel_width: 0,

@@ -225,10 +225,19 @@ impl Screen {
             self.x = 0;
             self.linefeed();
         }
-        let (fg, bg) = if self.inverse {
-            (self.bg, self.fg)
+        let bright_fg = if self.bold {
+            self.palette.ansi[..8]
+                .iter()
+                .position(|&color| color == self.fg)
+                .map(|index| self.palette.ansi[index + 8])
+                .unwrap_or(self.fg)
         } else {
-            (self.fg, self.bg)
+            self.fg
+        };
+        let (fg, bg) = if self.inverse {
+            (self.bg, bright_fg)
+        } else {
+            (bright_fg, self.bg)
         };
         self.grid[self.y][self.x] = Cell {
             ch,
@@ -470,7 +479,7 @@ impl Perform for Screen {
             }
             'J' => self.erase_display(values.first().copied().unwrap_or(0)),
             'K' => self.erase_line(values.first().copied().unwrap_or(0)),
-            'm' => self.sgr(&values),
+            'm' => self.sgr(if values.is_empty() { &[0] } else { &values }),
             'S' => self.scroll_up(n(0).min(self.rows)),
             'T' => self.scroll_down(n(0).min(self.rows)),
             'r' => {
