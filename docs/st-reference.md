@@ -20,11 +20,26 @@ vendor or translate upstream C source.
 - macOS AppKit and Linux/Wayland are equally important.
 - 24-bit ANSI color, bounded scrollback and font fallback by default.
 
+## Keyboard compatibility (implemented)
+
+- st's legacy F1-F12, F13-F35, and modified cursor/function-key sequences are
+  encoded in `src/keyboard.rs`, with byte-for-byte test vectors in
+  `src/keyboard_tests.rs`.
+- CSI ? 1 h/l selects application cursor keys; ESC = / ESC > selects DEC
+  application keypad mode. Physical keypad identity is used only in that mode.
+- Regular text uses the logical keyboard layout; AltGr-generated printable
+  characters take precedence over Ctrl+Alt escape encoding.
+- Standard navigation, Ctrl+Space, Shift+Tab, Meta-prefix and modified
+  Home/End/Insert/Delete/PageUp/Down are covered.
+- Native shortcuts (including Cmd copy/paste and text zoom) still take
+  precedence. On the primary screen Shift+PageUp/Down scrolls history;
+  alternate-screen apps receive these keys.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
 - Full Unicode grapheme shaping, zero-width joining and ligatures.
-- Full DEC keyboard/mouse protocol modes and tracking.
+- Mouse reporting and modern negotiated keyboard protocols (CSI-u/kitty).
 - Native Wayland clipboard without compositor data-control extensions.
 - IME/preedit integration, hyperlinks, synchronized output, OSC 52 prompts.
 - Automated comparison tests against a pinned upstream st revision.

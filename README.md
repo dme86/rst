@@ -85,6 +85,26 @@ blink_interval_ms = 700
 Set `blink = false` to keep the cursor steady, or adjust
 `blink_interval_ms` between 100 and 3000.
 
+### Keyboard compatibility
+
+rst sends the traditional st/xterm keyboard sequences for F1–F12 (plus
+extended F13–F35), Insert/Delete, Home/End, PageUp/Down and arrow keys.
+Shift, Alt and Ctrl combinations use the standard xterm modifier parameters;
+Shift+Tab sends reverse-tab (CSI Z), and Ctrl+Space sends NUL. Left/Right
+Alt on international keyboard layouts preserve composed printable text
+(including AltGr) instead of turning it into unwanted control bytes.
+
+Application cursor mode (DECCKM / CSI ? 1 h/l) and DEC application keypad
+mode (DECKPAM/DECKPNM / ESC = and ESC >) are honored. The numeric keypad
+is identified by physical key code in application mode, while regular
+text input remains layout-aware. On the primary screen, Shift+PageUp/Down
+scrolls the local history; full-screen TUI apps receive those keys.
+
+See the table-driven protocol checks in `src/keyboard_tests.rs` and DEC-mode
+tests in `src/terminal.rs`. Shell shortcuts handled by the desktop
+environment may never reach the terminal. These changes do not implement
+Kitty keyboard protocol or CSI-u negotiation.
+
 ### Fonts and Nerd Font icons
 
 The default primary face is **0xProto Nerd Font Regular** (when installed), followed by `0xProto Nerd Font Mono`, JetBrainsMono Nerd Font, Symbols Nerd Font Mono, Menlo and other system monospace fonts. The font selector requests the normal/regular face by default. Fonts are not embedded: they must be installed on the host.

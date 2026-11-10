@@ -69,6 +69,7 @@ pub struct Screen {
     // UI blink phase, independent of DECTCEM visibility (CSI ?25 h/l).
     pub cursor_blink_on: bool,
     pub app_cursor: bool,
+    pub app_keypad: bool,
     pub bracketed_paste: bool,
     pub palette: Palette,
     fg: u32,
@@ -104,6 +105,7 @@ impl Screen {
             show_cursor: true,
             cursor_blink_on: true,
             app_cursor: false,
+            app_keypad: false,
             bracketed_paste: false,
             fg: palette.foreground,
             bg: palette.background,
@@ -185,6 +187,10 @@ impl Screen {
             self.grid.insert(self.scroll_top, blank);
         }
         self.view_offset = 0;
+    }
+
+    pub fn in_alternate_screen(&self) -> bool {
+        self.alternate.is_some()
     }
 
     pub fn scroll_view(&mut self, lines: i32) {
@@ -569,6 +575,8 @@ impl Perform for Screen {
             return;
         }
         match action {
+            b'=' => self.app_keypad = true,  // DECKPAM
+            b'>' => self.app_keypad = false, // DECKPNM
             b'D' => self.linefeed(),
             b'E' => {
                 self.x = 0;
@@ -658,6 +666,28 @@ mod tests {
         assert_eq!(term.screen.history.len(), 1);
         assert_eq!(term.screen.history[0][0].ch, 'a');
         assert_eq!(term.screen.grid[0][0].ch, 'b');
+    }
+
+    #[test]
+    fn deckpam_deckpnm_and_reset_restore_numeric_keypad() {
+        let mut term = terminal(8, 3);
+        assert!(!term.screen.app_keypad);
+        term.advance(b"\x1b=");
+        assert!(term.screen.app_keypad);
+        term.advance(b"\x1b>");
+        assert!(!term.screen.app_keypad);
+        term.advance(b"\x1b=\x1bc");
+        assert!(!term.screen.app_keypad);
+    }
+
+    #[test]
+    fn alternate_screen_state_is_visible_to_keyboard_shortcuts() {
+        let mut term = terminal(8, 3);
+        assert!(!term.screen.in_alternate_screen());
+        term.advance(b"\x1b[?1049h");
+        assert!(term.screen.in_alternate_screen());
+        term.advance(b"\x1b[?1049l");
+        assert!(!term.screen.in_alternate_screen());
     }
 
     #[test]
