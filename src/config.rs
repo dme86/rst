@@ -113,6 +113,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_window_has_no_outer_padding() {
+        let config: Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert_eq!(config.window.padding, 0);
+    }
+
+    #[test]
     fn bundled_default_prefers_0xproto_regular() {
         let defaults: Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();

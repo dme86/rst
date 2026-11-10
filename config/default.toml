@@ -4,7 +4,8 @@
 [window]
 columns = 96
 rows = 28
-padding = 8
+# Edge-to-edge by default; set > 0 to add an intentional gutter.
+padding = 0
 
 [font]
 family = "0xProto Nerd Font"

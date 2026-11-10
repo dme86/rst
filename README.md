@@ -18,6 +18,19 @@ make run
 
 The optional configuration file is `~/.config/rst/config.toml` (or `$XDG_CONFIG_HOME/rst/config.toml`). Defaults are embedded in the executable; see [`config/default.toml`](config/default.toml).
 
+### Borderless terminal / full-screen TUIs
+
+rst defaults to `[window] padding = 0`: Neovim and other full-screen terminal
+applications fill the entire **content area** without a contrasting outer
+gutter. The renderer extends the last row/column's background colors through
+any fractional leftover pixels from cell sizing, including statusline colors.
+
+If you previously ran `make config`, your
+`~/.config/rst/config.toml` overrides bundled defaults. Change its
+`[window] padding` to `0` as well; a nonzero value intentionally preserves
+the extra border. This setting controls the terminal's **inner** padding,
+not the native macOS window title bar.
+
 ### Fonts and Nerd Font icons
 
 The default primary face is **0xProto Nerd Font Regular** (when installed), followed by `0xProto Nerd Font Mono`, JetBrainsMono Nerd Font, Symbols Nerd Font Mono, Menlo and other system monospace fonts. The font selector requests the normal/regular face by default. Fonts are not embedded: they must be installed on the host.

@@ -147,7 +147,16 @@ impl Renderer {
         screen: &Screen,
         selection: Option<((usize, usize), (usize, usize))>,
     ) {
-        pixels.fill(screen.palette.background);
+        paint_backgrounds(
+            pixels,
+            width,
+            height,
+            screen,
+            self.cell_width,
+            self.cell_height,
+            self.padding,
+            selection,
+        );
 
         for row in 0..screen.rows {
             let y = self.padding + row * self.cell_height;
@@ -387,6 +396,74 @@ fn sample_glyph(glyph: &Glyph, x: usize, y: usize, dest_w: usize, dest_h: usize)
     (top * (1.0 - wy) + bottom * wy).round() as u8
 }
 
+/// Paint the complete terminal area in grid-cell colors, extending the
+/// final column and final row into fractional unused window pixels.
+///
+/// Font metrics cannot necessarily divide the window size exactly; leaving
+/// the remainder at the default palette color creates a visible frame around
+/// full-screen TUIs such as Neovim. With padding = 0 there is no gutter:
+/// application-provided cell colors reach every window edge.
+///
+/// An explicit nonzero padding is still respected as a user preference.
+#[allow(clippy::too_many_arguments)]
+fn paint_backgrounds(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    screen: &Screen,
+    cell_width: usize,
+    cell_height: usize,
+    padding: usize,
+    selection: Option<((usize, usize), (usize, usize))>,
+) {
+    pixels.fill(screen.palette.background);
+    if width == 0 || height == 0 || cell_width == 0 || cell_height == 0 {
+        return;
+    }
+
+    for row in 0..screen.rows {
+        let y = padding.saturating_add(row.saturating_mul(cell_height));
+        if y >= height {
+            break;
+        }
+        // No rounding artefacts at the bottom: the last row's background
+        // extends to the actual surface edge, rather than leaving a strip.
+        let row_height = if padding == 0 && row + 1 == screen.rows {
+            height - y
+        } else {
+            cell_height
+        };
+        for (col, &cell) in screen.display_row(row).iter().enumerate() {
+            if cell.width == 0 {
+                continue;
+            }
+            let x = padding.saturating_add(col.saturating_mul(cell_width));
+            if x >= width {
+                break;
+            }
+            let (_, background) = cell_colors(screen, row, col, cell, selection);
+            let cell_end = col + cell.width as usize;
+            // Extend the rightmost cell's background into the unused pixels
+            // (at most one cell width for normal window geometry).
+            let column_width = if padding == 0 && cell_end >= screen.cols {
+                width - x
+            } else {
+                cell_width * cell.width as usize
+            };
+            rect(
+                pixels,
+                width,
+                height,
+                x,
+                y,
+                column_width,
+                row_height,
+                background,
+            );
+        }
+    }
+}
+
 fn cell_colors(
     screen: &Screen,
     row: usize,
@@ -446,6 +523,46 @@ fn blend(fg: u32, bg: u32, alpha: u8) -> u32 {
 mod tests {
     use super::*;
 
+
+    fn test_screen() -> Screen {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        Screen::new(2, 2, 0, palette)
+    }
+
+    #[test]
+    fn full_screen_background_has_no_unpainted_edge_pixels() {
+        let mut screen = test_screen();
+        screen.grid[0][0].bg = 0x111111;
+        screen.grid[0][1].bg = 0x222222;
+        screen.grid[1][0].bg = 0x333333;
+        screen.grid[1][1].bg = 0x444444;
+
+        // A 2 x 2 grid of 5 x 4 cells, with 3 extra horizontal pixels
+        // and 2 extra vertical pixels from the window manager.
+        let (width, height) = (13, 10);
+        let mut pixels = vec![0; width * height];
+        paint_backgrounds(&mut pixels, width, height, &screen, 5, 4, 0, None);
+
+        assert_eq!(pixels[0], 0x111111); // top-left
+        assert_eq!(pixels[12], 0x222222); // right edge, top row
+        assert_eq!(pixels[9 * width], 0x333333); // bottom edge, left
+        assert_eq!(pixels[9 * width + 12], 0x444444); // bottom-right
+        assert_eq!(pixels[5 * width + 12], 0x444444); // right edge, bottom row
+    }
+
+    #[test]
+    fn explicit_padding_preserves_the_user_requested_gutter() {
+        let mut screen = test_screen();
+        screen.grid[0][0].bg = 0x111111;
+        let (width, height) = (16, 16);
+        let mut pixels = vec![0; width * height];
+        paint_backgrounds(&mut pixels, width, height, &screen, 5, 4, 2, None);
+        assert_eq!(pixels[0], screen.palette.background);
+        assert_eq!(pixels[2 * width + 2], 0x111111);
+        assert_eq!(pixels[15 * width + 15], screen.palette.background);
+    }
 
     #[test]
     fn glyph_rect_never_overflows_cell() {
