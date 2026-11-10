@@ -1069,4 +1069,81 @@ mod tests {
         assert_eq!(blend(0xffffff, 0, 0), 0);
         assert_eq!(blend(0xffffff, 0, 255), 0xffffff);
     }
+
+    fn style_from_sgr(sequence: &[u8]) -> TextStyle {
+        let fixture = test_screen();
+        let mut term = crate::terminal::Terminal::new(2, 2, 0, fixture.palette);
+        term.advance(sequence);
+        term.screen.grid[0][0].style
+    }
+
+    #[test]
+    fn faint_text_blends_foreground_with_effective_background() {
+        let faint = style_from_sgr(b"\x1b[2mX");
+        assert_eq!(effective_ink_color(faint, 0xffffff, 0), blend(0xffffff, 0, 128));
+        let plain = style_from_sgr(b"X");
+        assert_eq!(effective_ink_color(plain, 0xffffff, 0), 0xffffff);
+        assert_ne!(
+            effective_ink_color(faint, 0xffffff, 0x112233),
+            effective_ink_color(faint, 0xffffff, 0),
+        );
+    }
+
+    #[test]
+    fn underline_and_strike_draw_independent_horizontal_rules() {
+        let style = style_from_sgr(b"\x1b[4;9mX");
+        let mut pixels = vec![0u32; 16 * 16];
+        paint_decorations(
+            &mut pixels, 16, 16, 0, 0, 8, 12, 9, 12.0, style, 0xabcdef,
+        );
+        // Baseline at 9; strike at 9 - 9/3 = 6, underline at 10.
+        for col in 0..8 {
+            assert_eq!(pixels[6 * 16 + col], 0xabcdef);
+            assert_eq!(pixels[10 * 16 + col], 0xabcdef);
+        }
+        assert_eq!(pixels[5 * 16 + 3], 0);
+        assert_eq!(pixels[11 * 16 + 3], 0);
+        assert_eq!(pixels[6 * 16 + 8], 0);
+    }
+
+    #[test]
+    fn decorations_are_clipped_to_their_own_cell() {
+        let style = style_from_sgr(b"\x1b[4;9mX");
+        let mut pixels = vec![0u32; 11 * 7];
+        paint_decorations(&mut pixels, 11, 7, 8, 3, 6, 4, 50, 28.0, style, 0xff00ff);
+        assert!(pixels.iter().any(|&pixel| pixel == 0xff00ff));
+        for row in 0..7 {
+            assert!(pixels[row * 11..row * 11 + 8].iter().all(|&pixel| pixel == 0));
+        }
+    }
+
+    #[test]
+    fn hidden_and_blinking_attributes_suppress_glyph_and_decoration() {
+        let hidden = style_from_sgr(b"\x1b[8;4mX");
+        let blink = style_from_sgr(b"\x1b[5;9mX");
+        assert!(!hidden.visible(true));
+        assert!(!hidden.visible(false));
+        assert!(blink.visible(true));
+        assert!(!blink.visible(false));
+    }
+
+    #[test]
+    fn font_variant_cache_is_invalidated_on_zoom() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else {
+            return; // Host with no discoverable monospace fonts.
+        };
+        let normal = TextStyle::default();
+        let italic = style_from_sgr(b"\x1b[3mM");
+        let bold = style_from_sgr(b"\x1b[1mM");
+        renderer.glyph('M', normal);
+        renderer.glyph('M', italic);
+        renderer.glyph('M', bold);
+        assert!(!renderer.glyphs.is_empty());
+        assert_eq!(renderer.fonts.len(), renderer.styled_fonts.len());
+        renderer.set_font_size(config.font.size + 2.0, 1.0);
+        assert!(renderer.glyphs.is_empty());
+    }
+
 }
