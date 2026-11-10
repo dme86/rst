@@ -517,6 +517,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Switching to local scrollback must not leave a partial
+                // trackpad wheel delta queued for the child.
+                self.mouse_reporter.reset_scroll();
                 // Mouse reporting disabled or Shift held: retain rst's
                 // scrollback behavior on the primary screen.
                 let lines = match delta {
