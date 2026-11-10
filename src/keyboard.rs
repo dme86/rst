@@ -110,3 +110,105 @@ fn function_key(number: usize, modifier: u8) -> Vec<u8> {
         csi_tilde([15, 17, 18, 19, 20, 21, 23, 24][base - 5], modifier)
     }
 }
+
+/// Turn a key press into PTY bytes. Printable keys use logical text so
+/// non-US layouts and UTF-8 work; the numpad uses physical identity only
+/// when the child has requested DEC application keypad mode.
+pub fn encode_key(
+    key: &Key<&str>,
+    physical: PhysicalKey,
+    location: KeyLocation,
+    mods: ModifiersState,
+    modes: KeyboardModes,
+) -> Vec<u8> {
+    // Super / Command is reserved for window-manager and app shortcuts.
+    if mods.super_key() {
+        return Vec::new();
+    }
+
+    let modifier = modifier_parameter(mods);
+    let alt = mods.alt_key();
+
+    if modes.application_keypad {
+        if let PhysicalKey::Code(code) = physical {
+            // KeyCode::Numpad* is also valid when a backend reports a
+            // non-Numpad key location.
+            if let Some(letter) = keypad_code(code) {
+                return format!("\x1bO{letter}").into_bytes();
+            }
+        }
+        // Allow the location alone for the keypad center key when a
+        // backend has no corresponding physical code.
+        if location == KeyLocation::Numpad && matches!(key, Key::Named(NamedKey::Clear)) {
+            return b"\x1bOu".to_vec();
+        }
+    }
+
+    match key {
+        Key::Named(named) => {
+            if let Some(n) = function_number(*named) {
+                return function_key(n, modifier);
+            }
+            match named {
+                NamedKey::Space => with_alt(
+                    vec![if mods.control_key() { 0 } else { b' ' }],
+                    alt,
+                ),
+                NamedKey::Enter => with_alt(vec![b'\r'], alt),
+                NamedKey::Tab => {
+                    if mods.shift_key() {
+                        if modifier == 2 {
+                            b"\x1b[Z".to_vec()
+                        } else {
+                            format!("\x1b[1;{modifier}Z").into_bytes()
+                        }
+                    } else {
+                        with_alt(vec![b'\t'], alt)
+                    }
+                }
+                NamedKey::Backspace => with_alt(vec![0x7f], alt),
+                NamedKey::Escape => with_alt(vec![0x1b], alt),
+                NamedKey::ArrowUp => csi_letter('A', modifier, modes.application_cursor),
+                NamedKey::ArrowDown => csi_letter('B', modifier, modes.application_cursor),
+                NamedKey::ArrowRight => csi_letter('C', modifier, modes.application_cursor),
+                NamedKey::ArrowLeft => csi_letter('D', modifier, modes.application_cursor),
+                NamedKey::Home => {
+                    if modifier == 1 && modes.application_cursor {
+                        b"\x1b[1~".to_vec()
+                    } else {
+                        csi_letter('H', modifier, false)
+                    }
+                }
+                NamedKey::End => {
+                    if modifier == 1 {
+                        b"\x1b[4~".to_vec() // st's unmodified End
+                    } else {
+                        csi_letter('F', modifier, false)
+                    }
+                }
+                NamedKey::Insert => csi_tilde(2, modifier),
+                NamedKey::Delete => csi_tilde(3, modifier),
+                NamedKey::PageUp => csi_tilde(5, modifier),
+                NamedKey::PageDown => csi_tilde(6, modifier),
+                NamedKey::Clear => b"\x1b[E".to_vec(),
+                _ => Vec::new(),
+            }
+        }
+        Key::Character(text) => {
+            if mods.control_key() {
+                text.chars()
+                    .next()
+                    .and_then(control_character)
+                    .map(|byte| with_alt(vec![byte], alt))
+                    .unwrap_or_default()
+            } else {
+                with_alt(text.as_bytes().to_vec(), alt)
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+#[path = "keyboard_tests.rs"]
+mod tests;
