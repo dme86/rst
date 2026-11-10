@@ -822,4 +822,130 @@ mod tests {
         term.advance(b"hello\x1b[?1049hworld\x1b[?1049l");
         assert_eq!(term.screen.grid[0][0].ch, 'h');
     }
+
+    #[test]
+    fn sgr_attributes_are_persisted_per_cell() {
+        let mut term = terminal(20, 3);
+        term.advance(b"\x1b[1;2;3;4;5;7;8;9mA\x1b[23;24;28;29mB");
+        let first = term.screen.grid[0][0];
+        let second = term.screen.grid[0][1];
+        for flag in [
+            TextStyle::BOLD, TextStyle::FAINT, TextStyle::ITALIC,
+            TextStyle::UNDERLINE, TextStyle::BLINK, TextStyle::REVERSE,
+            TextStyle::INVISIBLE, TextStyle::STRUCK,
+        ] {
+            assert!(first.style.contains(flag), "missing SGR flag {:?}", flag);
+        }
+        for flag in [
+            TextStyle::ITALIC, TextStyle::UNDERLINE,
+            TextStyle::INVISIBLE, TextStyle::STRUCK,
+        ] {
+            assert!(!second.style.contains(flag), "SGR reset must clear {:?}", flag);
+        }
+        assert!(second.style.contains(TextStyle::BOLD));
+        assert!(second.style.contains(TextStyle::FAINT));
+        assert!(second.style.contains(TextStyle::BLINK));
+        assert!(second.style.contains(TextStyle::REVERSE));
+    }
+
+    #[test]
+    fn sgr_22_clears_bold_and_faint_without_touching_other_styles() {
+        let mut term = terminal(20, 3);
+        term.advance(b"\x1b[1;2;3mA\x1b[22mB");
+        let before = term.screen.grid[0][0].style;
+        let after = term.screen.grid[0][1].style;
+        assert!(before.contains(TextStyle::BOLD));
+        assert!(before.contains(TextStyle::FAINT));
+        assert!(!after.contains(TextStyle::BOLD));
+        assert!(!after.contains(TextStyle::FAINT));
+        assert!(after.contains(TextStyle::ITALIC));
+    }
+
+    #[test]
+    fn sgr_25_and_29_clear_blink_and_strikethrough() {
+        let mut term = terminal(20, 3);
+        term.advance(b"\x1b[6;9mA\x1b[25mB\x1b[29mC");
+        assert!(term.screen.grid[0][0].style.contains(TextStyle::BLINK));
+        assert!(term.screen.grid[0][0].style.contains(TextStyle::STRUCK));
+        assert!(!term.screen.grid[0][1].style.contains(TextStyle::BLINK));
+        assert!(term.screen.grid[0][1].style.contains(TextStyle::STRUCK));
+        assert!(!term.screen.grid[0][2].style.contains(TextStyle::STRUCK));
+    }
+
+    #[test]
+    fn sgr_zero_and_empty_sgr_reset_all_attributes_and_colors() {
+        let mut term = terminal(20, 3);
+        term.advance(b"\x1b[3;4;8;38;2;12;34;56;48;5;21mA\x1b[mB");
+        let changed = term.screen.grid[0][0];
+        let reset = term.screen.grid[0][1];
+        assert_eq!(changed.fg, 0x0c2238);
+        assert!(changed.style.contains(TextStyle::ITALIC));
+        assert!(changed.style.contains(TextStyle::UNDERLINE));
+        assert!(changed.style.contains(TextStyle::INVISIBLE));
+        assert_eq!(reset.fg, term.screen.palette.foreground);
+        assert_eq!(reset.bg, term.screen.palette.background);
+        assert_eq!(reset.style, TextStyle::default());
+        term.advance(b"\x1b[1;5m\x1b[0mC");
+        assert_eq!(term.screen.grid[0][2].style, TextStyle::default());
+    }
+
+    #[test]
+    fn bold_ansi_brightening_reverse_colors_and_reset() {
+        let mut term = terminal(20, 3);
+        term.advance(b"\x1b[31;1mA\x1b[7mB\x1b[27;22mC");
+        let first = term.screen.grid[0][0];
+        let reversed = term.screen.grid[0][1];
+        let reset = term.screen.grid[0][2];
+        assert_eq!(first.fg, term.screen.palette.ansi[9]);
+        assert!(first.style.contains(TextStyle::BOLD));
+        assert_eq!(reversed.fg, term.screen.palette.background);
+        assert_eq!(reversed.bg, term.screen.palette.ansi[9]);
+        assert!(reversed.style.contains(TextStyle::REVERSE));
+        assert!(!reset.style.contains(TextStyle::BOLD));
+        assert!(!reset.style.contains(TextStyle::REVERSE));
+        assert_eq!(reset.fg, term.screen.palette.ansi[1]);
+    }
+
+    #[test]
+    fn erased_cells_preserve_bce_but_drop_decorations() {
+        let mut term = terminal(8, 3);
+        term.advance(b"\x1b[4;9;48;2;12;34;56mA\x1b[2K");
+        for cell in &term.screen.grid[0] {
+            assert_eq!(cell.bg, 0x0c2238);
+            assert_eq!(cell.style, TextStyle::default());
+        }
+        term.advance(b"B");
+        assert!(term.screen.grid[0][1].style.contains(TextStyle::UNDERLINE));
+        assert!(term.screen.grid[0][1].style.contains(TextStyle::STRUCK));
+    }
+
+    #[test]
+    fn sgr_styles_survive_scrollback_and_alternate_screen() {
+        let mut term = terminal(8, 2);
+        term.advance(b"\x1b[3;4mA\r\nB\r\nC");
+        assert!(term.screen.history[0][0].style.contains(TextStyle::ITALIC));
+        assert!(term.screen.history[0][0].style.contains(TextStyle::UNDERLINE));
+        term.advance(b"\x1b[?1049h\x1b[9mZ\x1b[?1049l");
+        assert!(term.screen.grid[0][0].style.contains(TextStyle::ITALIC));
+        assert!(!term.screen.grid[0][0].style.contains(TextStyle::STRUCK));
+        term.advance(b"\x1bcD");
+        assert_eq!(term.screen.grid[0][0].style, TextStyle::default());
+    }
+
+    #[test]
+    fn text_blink_visibility_is_independent_from_cursor_and_only_when_needed() {
+        let mut term = terminal(8, 2);
+        assert!(!term.screen.has_blinking_text());
+        term.advance(b"\x1b[5mX\x1b[25mY");
+        assert!(term.screen.has_blinking_text());
+        term.screen.show_cursor = false;
+        term.screen.text_blink_on = false;
+        assert!(!term.screen.grid[0][0].style.visible(term.screen.text_blink_on));
+        assert!(term.screen.grid[0][1].style.visible(term.screen.text_blink_on));
+        term.screen.text_blink_on = true;
+        assert!(term.screen.grid[0][0].style.visible(term.screen.text_blink_on));
+        term.advance(b"\x1b[2J");
+        assert!(!term.screen.has_blinking_text());
+    }
+
 }
