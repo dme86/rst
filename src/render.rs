@@ -758,7 +758,11 @@ fn paint_backgrounds(
     padding: usize,
     selection: Option<((usize, usize), (usize, usize))>,
 ) {
-    pixels.fill(screen.palette.background);
+    pixels.fill(if screen.reverse_video {
+        screen.palette.foreground
+    } else {
+        screen.palette.background
+    });
     if width == 0 || height == 0 || cell_width == 0 || cell_height == 0 {
         return;
     }
@@ -827,12 +831,17 @@ fn cell_colors(
         && screen.view_offset == 0
         && row == screen.y
         && col == screen.x.min(screen.cols - 1);
-    if cursor {
+    let colors = if cursor {
         (screen.palette.background, screen.palette.cursor)
     } else if selected {
         (cell.fg, screen.palette.selection)
     } else {
         (cell.fg, cell.bg)
+    };
+    if screen.reverse_video {
+        (colors.1, colors.0)
+    } else {
+        colors
     }
 }
 
