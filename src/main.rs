@@ -168,6 +168,12 @@ impl App {
 
         let mut bytes: Vec<u8> = Vec::new();
         match key {
+            // Space is NamedKey::Space on macOS and Wayland, not Key::Character(" ").
+            Key::Named(NamedKey::Space) => bytes.extend_from_slice(space_bytes(
+                self.modifiers.control_key(),
+                self.modifiers.alt_key(),
+                self.modifiers.super_key(),
+            )),
             Key::Named(NamedKey::Enter) => bytes.push(b'\r'),
             Key::Named(NamedKey::Tab) => bytes.push(b'\t'),
             Key::Named(NamedKey::Backspace) => bytes.push(0x7f),
@@ -236,6 +242,20 @@ impl App {
             self.terminal.screen.view_offset = 0;
             self.pty.write(&bytes);
         }
+    }
+}
+
+// winit reports a space as a named key. Generate the same PTY bytes as a
+// printable character, including Ctrl+Space (NUL) and Alt+Space (ESC + space).
+fn space_bytes(control: bool, alt: bool, command: bool) -> &'static [u8] {
+    if command {
+        b""
+    } else if control {
+        b"\x00"
+    } else if alt {
+        b"\x1b "
+    } else {
+        b" "
     }
 }
 
@@ -411,4 +431,29 @@ fn main() -> Result<()> {
     };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::*;
+
+    #[test]
+    fn space_sends_ascii_space_to_pty() {
+        assert_eq!(space_bytes(false, false, false), b" ");
+    }
+
+    #[test]
+    fn ctrl_space_sends_nul() {
+        assert_eq!(space_bytes(true, false, false), b"\x00");
+    }
+
+    #[test]
+    fn alt_space_sends_escape_prefixed_space() {
+        assert_eq!(space_bytes(false, true, false), b"\x1b ");
+    }
+
+    #[test]
+    fn command_space_is_not_sent_to_shell() {
+        assert_eq!(space_bytes(false, false, true), b"");
+    }
 }
