@@ -5,12 +5,47 @@ use vte::{Params, Parser, Perform};
 
 use crate::{config::Colors, mouse::MouseTracking};
 
+/// Compact, per-cell SGR attributes. Like st's ATTR_* bitmask, these must
+/// travel with each glyph through scrollback, insert/delete, and alternate
+/// screen swaps instead of living only in the current cursor state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextStyle(u8);
+
+impl TextStyle {
+    pub const BOLD: Self = Self(1 << 0);
+    pub const FAINT: Self = Self(1 << 1);
+    pub const ITALIC: Self = Self(1 << 2);
+    pub const UNDERLINE: Self = Self(1 << 3);
+    pub const BLINK: Self = Self(1 << 4);
+    pub const REVERSE: Self = Self(1 << 5);
+    pub const INVISIBLE: Self = Self(1 << 6);
+    pub const STRUCK: Self = Self(1 << 7);
+
+    pub fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 != 0
+    }
+
+    fn set(&mut self, flag: Self, enabled: bool) {
+        if enabled {
+            self.0 |= flag.0;
+        } else {
+            self.0 &= !flag.0;
+        }
+    }
+
+    pub fn visible(self, blink_on: bool) -> bool {
+        !self.contains(Self::INVISIBLE)
+            && (!self.contains(Self::BLINK) || blink_on)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
     pub width: u8,
     pub fg: u32,
     pub bg: u32,
+    pub style: TextStyle,
 }
 
 #[derive(Clone)]
@@ -68,6 +103,8 @@ pub struct Screen {
     pub show_cursor: bool,
     // UI blink phase, independent of DECTCEM visibility (CSI ?25 h/l).
     pub cursor_blink_on: bool,
+    // Blink attribute (SGR 5/6) animates independently of the cursor.
+    pub text_blink_on: bool,
     pub app_cursor: bool,
     pub app_keypad: bool,
     pub mouse_tracking: MouseTracking,
@@ -76,8 +113,7 @@ pub struct Screen {
     pub palette: Palette,
     fg: u32,
     bg: u32,
-    bold: bool,
-    inverse: bool,
+    style: TextStyle,
     history_limit: usize,
     scroll_top: usize,
     scroll_bottom: usize,
@@ -95,6 +131,7 @@ impl Screen {
             width: 1,
             fg: palette.foreground,
             bg: palette.background,
+            style: TextStyle::default(),
         };
         Self {
             cols,
@@ -106,6 +143,7 @@ impl Screen {
             y: 0,
             show_cursor: true,
             cursor_blink_on: true,
+            text_blink_on: true,
             app_cursor: false,
             app_keypad: false,
             mouse_tracking: MouseTracking::Off,
@@ -113,8 +151,7 @@ impl Screen {
             bracketed_paste: false,
             fg: palette.foreground,
             bg: palette.background,
-            bold: false,
-            inverse: false,
+            style: TextStyle::default(),
             palette,
             history_limit,
             scroll_top: 0,
@@ -135,11 +172,14 @@ impl Screen {
             width: 1,
             fg,
             bg,
+            // Erased cells retain BCE colors, not the formatting of the
+            // glyph that was previously at this location.
+            style: TextStyle::default(),
         }
     }
 
     fn ink_colors(&self) -> (u32, u32) {
-        let bright_fg = if self.bold {
+        let bright_fg = if self.style.contains(TextStyle::BOLD) {
             self.palette.ansi[..8]
                 .iter()
                 .position(|&color| color == self.fg)
@@ -148,7 +188,7 @@ impl Screen {
         } else {
             self.fg
         };
-        if self.inverse {
+        if self.style.contains(TextStyle::REVERSE) {
             (self.bg, bright_fg)
         } else {
             (bright_fg, self.bg)
@@ -191,6 +231,16 @@ impl Screen {
             self.grid.insert(self.scroll_top, blank);
         }
         self.view_offset = 0;
+    }
+
+    /// Whether any displayed cell needs SGR blinking. Avoid a wakeup timer
+    /// for ordinary terminal output that does not contain blinking glyphs.
+    pub fn has_blinking_text(&self) -> bool {
+        (0..self.rows).any(|row| {
+            self.display_row(row)
+                .iter()
+                .any(|cell| cell.style.contains(TextStyle::BLINK))
+        })
     }
 
     pub fn in_alternate_screen(&self) -> bool {
@@ -265,6 +315,7 @@ impl Screen {
             width: width as u8,
             fg,
             bg,
+            style: self.style,
         };
         if width == 2 && self.x + 1 < self.cols {
             self.grid[self.y][self.x + 1] = Cell {
@@ -272,6 +323,7 @@ impl Screen {
                 width: 0,
                 fg,
                 bg,
+                style: self.style,
             };
         }
         self.x += width;
@@ -323,13 +375,26 @@ impl Screen {
                 0 => {
                     self.fg = self.palette.foreground;
                     self.bg = self.palette.background;
-                    self.bold = false;
-                    self.inverse = false;
+                    self.style = TextStyle::default();
                 }
-                1 => self.bold = true,
-                22 => self.bold = false,
-                7 => self.inverse = true,
-                27 => self.inverse = false,
+                1 => self.style.set(TextStyle::BOLD, true),
+                2 => self.style.set(TextStyle::FAINT, true),
+                3 => self.style.set(TextStyle::ITALIC, true),
+                4 => self.style.set(TextStyle::UNDERLINE, true),
+                5 | 6 => self.style.set(TextStyle::BLINK, true),
+                7 => self.style.set(TextStyle::REVERSE, true),
+                8 => self.style.set(TextStyle::INVISIBLE, true),
+                9 => self.style.set(TextStyle::STRUCK, true),
+                22 => {
+                    self.style.set(TextStyle::BOLD, false);
+                    self.style.set(TextStyle::FAINT, false);
+                }
+                23 => self.style.set(TextStyle::ITALIC, false),
+                24 => self.style.set(TextStyle::UNDERLINE, false),
+                25 => self.style.set(TextStyle::BLINK, false),
+                27 => self.style.set(TextStyle::REVERSE, false),
+                28 => self.style.set(TextStyle::INVISIBLE, false),
+                29 => self.style.set(TextStyle::STRUCK, false),
                 30..=37 => self.fg = self.palette.ansi[(params[i] - 30) as usize],
                 40..=47 => self.bg = self.palette.ansi[(params[i] - 40) as usize],
                 90..=97 => self.fg = self.palette.ansi[(params[i] - 90 + 8) as usize],
