@@ -109,9 +109,9 @@ applies a lightweight synthetic fallback without changing terminal cell
 dimensions. The blink timer is independent of cursor blinking and sleeps when
 no visible text requires animation.
 
-For a quick check: \`printf '\\033[1;3;4mBold italic underlined\\033[0m\\n'\`.
-The corresponding state and rendering tests are in \`src/terminal.rs\` and
-\`src/render.rs\`. Extended SGR underline styles/colors and font ligatures are
+For a quick check: `printf '\\033[1;3;4mBold italic underlined\\033[0m\\n'`.
+The corresponding state and rendering tests are in `src/terminal.rs` and
+`src/render.rs`. Extended SGR underline styles/colors and font ligatures are
 outside vanilla st parity and remain future work.
 
 ### Keyboard compatibility
