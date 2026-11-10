@@ -3,7 +3,7 @@ mod pty;
 mod render;
 mod terminal;
 
-use std::{num::NonZeroU32, sync::Arc};
+use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};
 
 use anyhow::Result;
 use softbuffer::{Context, Surface};
@@ -36,6 +36,7 @@ struct App {
     mouse: (f64, f64),
     selection: Option<((usize, usize), (usize, usize))>,
     selecting: bool,
+    next_cursor_blink: Instant,
 }
 
 impl App {
@@ -171,10 +172,26 @@ impl App {
         self.resize_terminal();
     }
 
+    fn reset_cursor_blink(&mut self) {
+        if !self.config.cursor.blink {
+            return;
+        }
+        self.next_cursor_blink =
+            Instant::now() + Duration::from_millis(self.config.cursor.blink_interval_ms);
+        if !self.terminal.screen.cursor_blink_on {
+            self.terminal.screen.cursor_blink_on = true;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     fn handle_key(&mut self, event: KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
         }
+        // Typing wakes the cursor and restarts the blink interval.
+        self.reset_cursor_blink();
         let key = event.logical_key.as_ref();
         if let Some(action) = zoom_shortcut(
             &key,
@@ -326,6 +343,20 @@ fn zoom_shortcut(
     }
 }
 
+/// Calculate the next blink frame without relying on timers or a busy-loop.
+fn blink_step(
+    visible: bool,
+    next: Instant,
+    now: Instant,
+    interval: Duration,
+) -> (bool, Instant) {
+    if now >= next {
+        (!visible, now + interval)
+    } else {
+        (visible, next)
+    }
+}
+
 fn space_bytes(control: bool, alt: bool, command: bool) -> &'static [u8] {
     if command {
         b""
@@ -339,6 +370,37 @@ fn space_bytes(control: bool, alt: bool, command: bool) -> &'static [u8] {
 }
 
 impl ApplicationHandler<UserEvent> for App {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.config.cursor.blink
+            && self.terminal.screen.show_cursor
+            && self.window.is_some()
+        {
+            let now = Instant::now();
+            let interval = Duration::from_millis(self.config.cursor.blink_interval_ms);
+            let (visible, next) = blink_step(
+                self.terminal.screen.cursor_blink_on,
+                self.next_cursor_blink,
+                now,
+                interval,
+            );
+            if visible != self.terminal.screen.cursor_blink_on {
+                self.terminal.screen.cursor_blink_on = visible;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            self.next_cursor_blink = next;
+            // Sleep between blink events. No continuous frame loop.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+        } else {
+            // If a TUI hides the cursor (DECTCEM), don't animate it.
+            self.terminal.screen.cursor_blink_on = true;
+            self.next_cursor_blink = Instant::now()
+                + Duration::from_millis(self.config.cursor.blink_interval_ms);
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -492,6 +554,7 @@ fn main() -> Result<()> {
         palette,
     );
     let original_font_size = config.font.size;
+    let config_blink_ms = config.cursor.blink_interval_ms;
     let mut app = App {
         config,
         original_font_size,
@@ -505,6 +568,8 @@ fn main() -> Result<()> {
         mouse: (0.0, 0.0),
         selection: None,
         selecting: false,
+        next_cursor_blink: Instant::now()
+            + Duration::from_millis(config_blink_ms),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -513,6 +578,21 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod keyboard_tests {
     use super::*;
+
+    #[test]
+    fn cursor_blink_steps_only_after_deadline() {
+        let now = Instant::now();
+        let interval = Duration::from_millis(700);
+        let due = now + interval;
+        let (visible, deadline) = blink_step(true, due, now, interval);
+        assert!(visible);
+        assert_eq!(deadline, due);
+        let (visible, deadline) = blink_step(true, due, due, interval);
+        assert!(!visible);
+        assert_eq!(deadline, due + interval);
+        let (visible, _) = blink_step(false, deadline, deadline, interval);
+        assert!(visible);
+    }
 
     #[test]
     fn macos_command_plus_and_minus_are_zoom_shortcuts() {

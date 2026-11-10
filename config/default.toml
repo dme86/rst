@@ -4,8 +4,9 @@
 [window]
 columns = 96
 rows = 28
-# Edge-to-edge by default; set > 0 to add an intentional gutter.
-padding = 0
+# Small text inset; terminal applications' background colors still
+# paint all the way to the window edges.
+padding = 6
 
 [font]
 family = "0xProto Nerd Font"
@@ -19,6 +20,8 @@ fallback = [
 
 [cursor]
 style = "block"
+blink = true
+blink_interval_ms = 700
 
 [scrollback]
 lines = 10000

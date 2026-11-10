@@ -41,18 +41,40 @@ on every zoom keypress. The existing window dimensions are retained, while
 the grid is recalculated and the PTY receives a resize notification so
 tmux and Neovim adapt.
 
-### Borderless terminal / full-screen TUIs
+### Comfortable spacing without a visible TUI border
 
-rst defaults to `[window] padding = 0`: Neovim and other full-screen terminal
-applications fill the entire **content area** without a contrasting outer
-gutter. The renderer extends the last row/column's background colors through
-any fractional leftover pixels from cell sizing, including statusline colors.
+rst now defaults to `[window] padding = 6` (logical pixels): text and the
+cursor are inset slightly from the left and top, so the shell doesn't press
+against the window edge. **Full-screen applications remain visually
+edge-to-edge:** the renderer extends the surrounding cell's background colors
+through the inset and any unused pixels, rather than painting a contrasting
+frame around Neovim or tmux.
 
-If you previously ran `make config`, your
-`~/.config/rst/config.toml` overrides bundled defaults. Change its
-`[window] padding` to `0` as well; a nonzero value intentionally preserves
-the extra border. This setting controls the terminal's **inner** padding,
-not the native macOS window title bar.
+If you already have `~/.config/rst/config.toml`, that file overrides the
+bundled defaults. Set `[window] padding = 6` there to adopt the new spacing;
+use `0` if you prefer no inset. This affects the terminal's content area,
+not macOS window decorations.
+
+### Cursor blink
+
+The default block cursor blinks continuously with 700 ms visible / 700 ms
+hidden, using a deadline-based event-loop timer rather than continuous
+redraws. Typing immediately restores the cursor and restarts its timer.
+Applications can still hide the cursor using the standard terminal escape
+sequence.
+
+```toml
+[window]
+padding = 6
+
+[cursor]
+style = "block"
+blink = true
+blink_interval_ms = 700
+```
+
+Set `blink = false` to keep the cursor steady, or adjust
+`blink_interval_ms` between 100 and 3000.
 
 ### Fonts and Nerd Font icons
 

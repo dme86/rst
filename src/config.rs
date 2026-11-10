@@ -31,6 +31,8 @@ pub struct FontConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct CursorConfig {
     pub style: String,
+    pub blink: bool,
+    pub blink_interval_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -105,6 +107,7 @@ pub fn load() -> Result<Config> {
     anyhow::ensure!(config.font.size >= 6.0 && config.font.size <= 72.0, "font size must be 6..72");
     anyhow::ensure!(config.window.padding <= 128, "padding must be <= 128");
     anyhow::ensure!(config.cursor.style == "block", "only cursor.style = 'block' is supported in v0.1");
+    anyhow::ensure!((100..=3000).contains(&config.cursor.blink_interval_ms), "cursor.blink_interval_ms must be 100..3000");
     Ok(config)
 }
 
@@ -120,10 +123,12 @@ mod tests {
     }
 
     #[test]
-    fn default_window_has_no_outer_padding() {
+    fn default_padding_and_cursor_blink_are_enabled() {
         let config: Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
-        assert_eq!(config.window.padding, 0);
+        assert_eq!(config.window.padding, 6);
+        assert!(config.cursor.blink);
+        assert_eq!(config.cursor.blink_interval_ms, 700);
     }
 
     #[test]

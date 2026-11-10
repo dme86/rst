@@ -619,12 +619,14 @@ fn paint_backgrounds(
         if y >= height {
             break;
         }
-        // No rounding artefacts at the bottom: the last row's background
-        // extends to the actual surface edge, rather than leaving a strip.
-        let row_height = if padding == 0 && row + 1 == screen.rows {
-            height - y
+        // Extend the first and last rows' backgrounds to the physical
+        // edges. Padding moves only *text*, never introduces a separate
+        // contrasting stripe around Neovim or other full-screen TUIs.
+        let start_y = if row == 0 { 0 } else { y };
+        let end_y = if row + 1 == screen.rows {
+            height
         } else {
-            cell_height
+            y.saturating_add(cell_height).min(height)
         };
         for (col, &cell) in screen.display_row(row).iter().enumerate() {
             if cell.width == 0 {
@@ -635,22 +637,21 @@ fn paint_backgrounds(
                 break;
             }
             let (_, background) = cell_colors(screen, row, col, cell, selection);
-            let cell_end = col + cell.width as usize;
-            // Extend the rightmost cell's background into the unused pixels
-            // (at most one cell width for normal window geometry).
-            let column_width = if padding == 0 && cell_end >= screen.cols {
-                width - x
+            let start_x = if col == 0 { 0 } else { x };
+            let end_x = if col + cell.width as usize >= screen.cols {
+                width
             } else {
-                cell_width * cell.width as usize
+                x.saturating_add(cell_width.saturating_mul(cell.width as usize))
+                    .min(width)
             };
             rect(
                 pixels,
                 width,
                 height,
-                x,
-                y,
-                column_width,
-                row_height,
+                start_x,
+                start_y,
+                end_x.saturating_sub(start_x),
+                end_y.saturating_sub(start_y),
                 background,
             );
         }
@@ -673,6 +674,7 @@ fn cell_colors(
         (row, col) >= (start.1, start.0) && (row, col) <= (end.1, end.0)
     });
     let cursor = screen.show_cursor
+        && screen.cursor_blink_on
         && screen.view_offset == 0
         && row == screen.y
         && col == screen.x.min(screen.cols - 1);
@@ -762,15 +764,37 @@ mod tests {
     }
 
     #[test]
-    fn explicit_padding_preserves_the_user_requested_gutter() {
+    fn small_padding_insets_text_but_backgrounds_reach_each_edge() {
         let mut screen = test_screen();
         screen.grid[0][0].bg = 0x111111;
+        screen.grid[0][1].bg = 0x222222;
+        screen.grid[1][0].bg = 0x333333;
+        screen.grid[1][1].bg = 0x444444;
         let (width, height) = (16, 16);
         let mut pixels = vec![0; width * height];
         paint_backgrounds(&mut pixels, width, height, &screen, 5, 4, 2, None);
-        assert_eq!(pixels[0], screen.palette.background);
+        assert_eq!(pixels[0], 0x111111); // top-left gutter follows first cell
         assert_eq!(pixels[2 * width + 2], 0x111111);
-        assert_eq!(pixels[15 * width + 15], screen.palette.background);
+        assert_eq!(pixels[width - 1], 0x222222); // right edge
+        assert_eq!(pixels[15 * width], 0x333333); // bottom left
+        assert_eq!(pixels[15 * width + 15], 0x444444); // bottom right
+    }
+
+    #[test]
+    fn cursor_blink_phase_hides_only_the_cursor_overlay() {
+        let mut screen = test_screen();
+        screen.grid[0][0].bg = 0x112233;
+        screen.cursor_blink_on = false;
+        let mut pixels = vec![0; 13 * 10];
+        screen.show_cursor = true;
+        paint_backgrounds(&mut pixels, 13, 10, &screen, 5, 4, 0, None);
+        assert_eq!(pixels[0], 0x112233);
+        screen.cursor_blink_on = true;
+        paint_backgrounds(&mut pixels, 13, 10, &screen, 5, 4, 0, None);
+        assert_eq!(pixels[0], screen.palette.cursor);
+        screen.show_cursor = false;
+        paint_backgrounds(&mut pixels, 13, 10, &screen, 5, 4, 0, None);
+        assert_eq!(pixels[0], 0x112233);
     }
 
     #[test]

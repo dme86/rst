@@ -66,6 +66,8 @@ pub struct Screen {
     pub x: usize,
     pub y: usize,
     pub show_cursor: bool,
+    // UI blink phase, independent of DECTCEM visibility (CSI ?25 h/l).
+    pub cursor_blink_on: bool,
     pub app_cursor: bool,
     pub bracketed_paste: bool,
     pub palette: Palette,
@@ -100,6 +102,7 @@ impl Screen {
             x: 0,
             y: 0,
             show_cursor: true,
+            cursor_blink_on: true,
             app_cursor: false,
             bracketed_paste: false,
             fg: palette.foreground,

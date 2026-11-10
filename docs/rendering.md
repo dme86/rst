@@ -21,6 +21,13 @@ terminal cursor movement. The renderer now maintains these invariants:
 The placement and Powerline geometry have unit tests in `src/render.rs`.
 Background Color Erase has a regression test in `src/terminal.rs`.
 
+The default 6 px text inset is intentionally **not a separate colored border**:
+the first and last rows and columns extend their actual background colors to
+the window edges. Full-screen TUIs continue to fill the content area.
+Cursor visibility has two separate dimensions: application-controlled
+DECTCEM visibility, and the UI's 700 ms blink phase. The event loop sleeps
+between changes, and typing resets the blink to visible.
+
 ## Optical alignment of Nerd Font icons
 
 Nerd Font icons are Unicode private-use glyphs, not ordinary letterforms.
