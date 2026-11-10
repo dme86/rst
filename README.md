@@ -1,4 +1,9 @@
-# rst — Rust Simple Terminal
+<p align="center">
+  <img src="assets/logo.png" alt="rst — Rust Simple Terminal" width="190">
+</p>
+
+<h1 align="center">rst</h1>
+<p align="center"><strong>Rust Simple Terminal</strong></p>
 
 A small, native terminal emulator for **macOS** and **Linux/Wayland**, inspired by the design philosophy of [suckless st](https://git.suckless.org/st/).
 
@@ -14,7 +19,11 @@ cd rst
 make run
 ```
 
-`make run` builds the debug executable and opens a native window running your `$SHELL` (default `/bin/sh`). Other targets: `make build`, `make release`, `make test`, `make fmt`, `make lint`, `make clean` and `make help`.
+On macOS, `make run` builds a native `target/debug/rst.app` with the Dock icon and opens it through Launch Services. On Linux/Wayland, it runs the executable directly. Both use `$SHELL` (default: `/bin/sh`).
+
+For macOS packaging: `make macos-app` (debug), `make macos-release` (optimized) and `make install-macos` (copies to `~/Applications`). For direct console logs run `make run-cli`. The locally built macOS app is unsigned; public distribution requires signing and notarization. The generated app icon uses the checked-in `assets/logo.png`.
+
+Other targets: `make build`, `make release`, `make test`, `make fmt`, `make lint`, `make clean`, `make help`.
 
 The optional configuration file is `~/.config/rst/config.toml` (or `$XDG_CONFIG_HOME/rst/config.toml`). Defaults are embedded in the executable; see [`config/default.toml`](config/default.toml).
 
@@ -85,7 +94,7 @@ If you already created a user config, that file overrides new defaults. Set the 
 ```toml
 [font]
 family = "0xProto Nerd Font"
-size = 15.0
+size = 16.5
 ```
 
 To inspect which font families rst found and identify missing glyph codepoints, launch with `RST_DEBUG_FONTS=1 make run`. Missing icons can also originate in the current renderer's incomplete Unicode/grapheme support.
