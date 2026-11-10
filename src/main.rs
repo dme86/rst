@@ -17,6 +17,8 @@ use winit::{
     window::{Window, WindowId},
 };
 
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+
 use crate::{
     config::Config,
     keyboard::{encode_key, KeyboardModes},
@@ -244,6 +246,7 @@ impl App {
             &key,
             event.physical_key,
             event.location,
+            event.text_with_all_modifiers(),
             self.modifiers,
             KeyboardModes {
                 application_cursor: self.terminal.screen.app_cursor,
