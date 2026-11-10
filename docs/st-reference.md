@@ -35,11 +35,25 @@ vendor or translate upstream C source.
   precedence. On the primary screen Shift+PageUp/Down scrolls history;
   alternate-screen apps receive these keys.
 
+## Mouse reporting (implemented)
+
+- DEC 9 (X10), 1000 (press/release), 1002 (pressed-button motion),
+  1003 (all motion), and SGR 1006 are parsed in `src/terminal.rs`.
+- `src/mouse.rs` follows upstream st's `x.c::mousereport`: button code,
+  lowest-held-button motion, modifier bits, legacy 223-cell limit, SGR
+  M/m release suffix, and wheel press codes (64-67).
+- Mouse tracking suppresses local selection/scrollback; holding Shift forces
+  local selection and scrolling (st's `forcemousemod` behavior).
+- Mouse/trackpad events are handled through winit for both macOS and
+  Wayland, with fractional pixel-wheel deltas accumulated into events.
+- Protocol byte vectors and behavior checks live in `src/mouse_tests.rs`
+  and the terminal unit tests.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
 - Full Unicode grapheme shaping, zero-width joining and ligatures.
-- Mouse reporting and modern negotiated keyboard protocols (CSI-u/kitty).
+- Modern negotiated keyboard protocols (CSI-u/kitty) and advanced mouse extensions outside upstream st.
 - Native Wayland clipboard without compositor data-control extensions.
 - IME/preedit integration, hyperlinks, synchronized output, OSC 52 prompts.
 - Automated comparison tests against a pinned upstream st revision.

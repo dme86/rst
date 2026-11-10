@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Parser, Perform};
 
-use crate::config::Colors;
+use crate::{config::Colors, mouse::MouseTracking};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
@@ -70,6 +70,8 @@ pub struct Screen {
     pub cursor_blink_on: bool,
     pub app_cursor: bool,
     pub app_keypad: bool,
+    pub mouse_tracking: MouseTracking,
+    pub mouse_sgr: bool,
     pub bracketed_paste: bool,
     pub palette: Palette,
     fg: u32,
@@ -106,6 +108,8 @@ impl Screen {
             cursor_blink_on: true,
             app_cursor: false,
             app_keypad: false,
+            mouse_tracking: MouseTracking::Off,
+            mouse_sgr: false,
             bracketed_paste: false,
             fg: palette.foreground,
             bg: palette.background,
@@ -432,6 +436,22 @@ impl Screen {
         match mode {
             1 => self.app_cursor = enabled,
             25 => self.show_cursor = enabled,
+            // Like st, tracking modes are mutually exclusive; 1006 only
+            // selects the wire encoding and does not itself enable reports.
+            9 | 1000 | 1002 | 1003 => {
+                self.mouse_tracking = if enabled {
+                    match mode {
+                        9 => MouseTracking::X10,
+                        1000 => MouseTracking::Button,
+                        1002 => MouseTracking::ButtonMotion,
+                        1003 => MouseTracking::AnyMotion,
+                        _ => unreachable!(),
+                    }
+                } else {
+                    MouseTracking::Off
+                };
+            }
+            1006 => self.mouse_sgr = enabled,
             47 | 1047 | 1049 => self.set_alternate(enabled),
             2004 => self.bracketed_paste = enabled,
             _ => {}
@@ -688,6 +708,47 @@ mod tests {
         assert!(term.screen.in_alternate_screen());
         term.advance(b"\x1b[?1049l");
         assert!(!term.screen.in_alternate_screen());
+    }
+
+    #[test]
+    fn dec_mouse_modes_are_exclusive_and_sgr_is_independent() {
+        let mut term = terminal(80, 24);
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::Off);
+        assert!(!term.screen.mouse_sgr);
+
+        term.advance(b"\x1b[?1000;1006h");
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::Button);
+        assert!(term.screen.mouse_sgr);
+
+        term.advance(b"\x1b[?1002h");
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::ButtonMotion);
+        term.advance(b"\x1b[?1003h");
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::AnyMotion);
+        term.advance(b"\x1b[?1003l");
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::Off);
+        assert!(term.screen.mouse_sgr);
+
+        term.advance(b"\x1b[?9h");
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::X10);
+        term.advance(b"\x1b[?1006l");
+        assert!(!term.screen.mouse_sgr);
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::X10);
+        term.advance(b"\x1b[?9l");
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::Off);
+    }
+
+    #[test]
+    fn mouse_mode_reset_and_alternate_screen_switch() {
+        let mut term = terminal(80, 24);
+        term.advance(b"\x1b[?1002;1006h\x1b[?1049h");
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::ButtonMotion);
+        assert!(term.screen.mouse_sgr);
+        term.advance(b"\x1b[?1049l");
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::ButtonMotion);
+
+        term.advance(b"\x1bc");
+        assert_eq!(term.screen.mouse_tracking, MouseTracking::Off);
+        assert!(!term.screen.mouse_sgr);
     }
 
     #[test]

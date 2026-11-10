@@ -105,6 +105,27 @@ tests in `src/terminal.rs`. Shell shortcuts handled by the desktop
 environment may never reach the terminal. These changes do not implement
 Kitty keyboard protocol or CSI-u negotiation.
 
+### Mouse reporting
+
+rst implements upstream st's legacy X10 (CSI ? 9 h), button tracking
+(CSI ? 1000 h), drag tracking (CSI ? 1002 h), and all-motion tracking
+(CSI ? 1003 h). SGR extended coordinates (CSI ? 1006 h) use the modern
+CSI < button ; column ; row M/m format. Applications such as tmux,
+Neovim and text-based editors activate and deactivate these modes themselves.
+
+Clicks (including middle/right and extra mouse buttons), button releases,
+dragging, cursor motion and vertical/horizontal wheel events are forwarded
+to the application only when tracking is active. Normal rst selection and
+scrollback remain unchanged when tracking is off. Hold **Shift** to
+temporarily select text while a TUI is tracking the mouse, matching
+the original st's forced-selection modifier. Shift+wheel uses local scrollback
+on the primary screen; alternate-screen applications do not expose that history.
+
+Wheel events use cell-aware accumulation for smooth trackpad pixel deltas
+on macOS/Wayland. Mouse reports are tested byte-for-byte against the
+legacy/SGR protocol in `src/mouse_tests.rs`. OSC or Kitty-specific mouse
+extensions (not provided by vanilla st) are not part of this implementation.
+
 ### Fonts and Nerd Font icons
 
 The default primary face is **0xProto Nerd Font Regular** (when installed), followed by `0xProto Nerd Font Mono`, JetBrainsMono Nerd Font, Symbols Nerd Font Mono, Menlo and other system monospace fonts. The font selector requests the normal/regular face by default. Fonts are not embedded: they must be installed on the host.
@@ -124,7 +145,7 @@ To inspect which font families rst found and identify missing glyph codepoints, 
 
 One window and one PTY, with an owned terminal grid, ANSI parser, basic VT operations, 24-bit color, font fallback, bounded scrollback and native copy/paste. No tabs, shell integration, Electron, GTK, X11, or XWayland. On Linux, the windowing backend is **Wayland-only**.
 
-This is a work-in-progress: extended VT modes, IME, grapheme shaping, complete alt-screen compatibility, font ligatures, full mouse reporting and OSC 52 security prompts remain to be implemented/tested. Linux clipboard integration currently relies on compositor data-control support; the macOS native clipboard is the primary first-run target.
+This is a work-in-progress: extended VT modes, IME, grapheme shaping, complete alt-screen compatibility, font ligatures and OSC 52 security prompts remain to be implemented/tested. Linux clipboard integration currently relies on compositor data-control support; the macOS native clipboard is the primary first-run target.
 
 ## Inspiration and attribution
 
