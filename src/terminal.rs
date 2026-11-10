@@ -90,6 +90,18 @@ struct SavedScreen {
     grid: Vec<Vec<Cell>>,
     x: usize,
     y: usize,
+    wrap_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CursorSnapshot {
+    x: usize,
+    y: usize,
+    wrap_pending: bool,
+    fg: u32,
+    bg: u32,
+    style: TextStyle,
+    origin_mode: bool,
 }
 
 pub struct Screen {
@@ -110,6 +122,13 @@ pub struct Screen {
     pub mouse_tracking: MouseTracking,
     pub mouse_sgr: bool,
     pub bracketed_paste: bool,
+    pub focus_reporting: bool,
+    pub keyboard_lock: bool,
+    pub reverse_video: bool,
+    pub origin_mode: bool,
+    pub auto_wrap: bool,
+    pub insert_mode: bool,
+    pub newline_mode: bool,
     pub palette: Palette,
     fg: u32,
     bg: u32,
@@ -117,7 +136,10 @@ pub struct Screen {
     history_limit: usize,
     scroll_top: usize,
     scroll_bottom: usize,
-    saved_cursor: (usize, usize),
+    tab_stops: Vec<bool>,
+    wrap_pending: bool,
+    saved_cursor: CursorSnapshot,
+    saved_primary_cursor: Option<CursorSnapshot>,
     alternate: Option<SavedScreen>,
     replies: Vec<u8>,
 }
@@ -149,6 +171,13 @@ impl Screen {
             mouse_tracking: MouseTracking::Off,
             mouse_sgr: false,
             bracketed_paste: false,
+            focus_reporting: false,
+            keyboard_lock: false,
+            reverse_video: false,
+            origin_mode: false,
+            auto_wrap: true,
+            insert_mode: false,
+            newline_mode: false,
             fg: palette.foreground,
             bg: palette.background,
             style: TextStyle::default(),
@@ -156,9 +185,102 @@ impl Screen {
             history_limit,
             scroll_top: 0,
             scroll_bottom: rows,
-            saved_cursor: (0, 0),
+            tab_stops: (0..cols).map(|col| col != 0 && col % 8 == 0).collect(),
+            wrap_pending: false,
+            saved_cursor: CursorSnapshot {
+                x: 0,
+                y: 0,
+                wrap_pending: false,
+                fg: blank.fg,
+                bg: blank.bg,
+                style: TextStyle::default(),
+                origin_mode: false,
+            },
+            saved_primary_cursor: None,
             alternate: None,
             replies: Vec::new(),
+        }
+    }
+
+    fn snapshot_cursor(&self) -> CursorSnapshot {
+        CursorSnapshot {
+            x: self.x.min(self.cols - 1),
+            y: self.y.min(self.rows - 1),
+            wrap_pending: self.wrap_pending,
+            fg: self.fg,
+            bg: self.bg,
+            style: self.style,
+            origin_mode: self.origin_mode,
+        }
+    }
+
+    fn save_cursor(&mut self) {
+        self.saved_cursor = self.snapshot_cursor();
+    }
+
+    fn restore_cursor(&mut self) {
+        let saved = self.saved_cursor;
+        self.restore_snapshot(saved);
+    }
+
+    fn restore_snapshot(&mut self, saved: CursorSnapshot) {
+        self.origin_mode = saved.origin_mode;
+        self.x = saved.x.min(self.cols - 1);
+        self.y = saved.y.min(self.rows - 1);
+        self.fg = saved.fg;
+        self.bg = saved.bg;
+        self.style = saved.style;
+        self.wrap_pending = self.auto_wrap && saved.wrap_pending && self.x + 1 == self.cols;
+    }
+
+    /// Absolute cursor movement clamps to DECOM's scrolling region.
+    fn move_to(&mut self, x: usize, y: usize) {
+        self.x = x.min(self.cols - 1);
+        let (top, bottom) = if self.origin_mode {
+            (self.scroll_top, self.scroll_bottom)
+        } else {
+            (0, self.rows)
+        };
+        self.y = y.clamp(top, bottom - 1);
+        self.wrap_pending = false;
+    }
+
+    /// CUP/HVP and VPA are relative to the top margin in origin mode.
+    fn move_to_origin(&mut self, x: usize, y: usize) {
+        let absolute_y = if self.origin_mode {
+            self.scroll_top.saturating_add(y)
+        } else {
+            y
+        };
+        self.move_to(x, absolute_y);
+    }
+
+    fn home_cursor(&mut self) {
+        self.move_to_origin(0, 0);
+    }
+
+    fn relative_y(&mut self, lines: i32) {
+        let y = if lines >= 0 {
+            self.y.saturating_add(lines as usize)
+        } else {
+            self.y.saturating_sub(lines.unsigned_abs() as usize)
+        };
+        self.move_to(self.x, y);
+    }
+
+    fn tab(&mut self, steps: i32) {
+        self.wrap_pending = false;
+        let count = steps.unsigned_abs().min(self.cols as u32);
+        if steps > 0 {
+            for _ in 0..count {
+                let next = (self.x + 1..self.cols).find(|&col| self.tab_stops[col]);
+                self.x = next.unwrap_or(self.cols - 1);
+            }
+        } else {
+            for _ in 0..count {
+                let prev = (0..self.x).rev().find(|&col| self.tab_stops[col]);
+                self.x = prev.unwrap_or(0);
+            }
         }
     }
 
@@ -200,7 +322,8 @@ impl Screen {
     }
 
     fn linefeed(&mut self) {
-        if self.y + 1 == self.scroll_bottom {
+        self.wrap_pending = false;
+        if self.y >= self.scroll_top && self.y + 1 == self.scroll_bottom {
             self.scroll_up(1);
         } else {
             self.y = (self.y + 1).min(self.rows - 1);
@@ -290,24 +413,63 @@ impl Screen {
             saved.x = saved.x.min(cols - 1);
             saved.y = saved.y.min(rows - 1);
         }
+        let previous_tab_width = self.tab_stops.len();
+        self.tab_stops.resize_with(cols, || false);
+        // New columns get conventional 8-cell tab stops; existing user
+        // customizations survive a resize just like st.
+        for col in previous_tab_width..cols {
+            self.tab_stops[col] = col != 0 && col % 8 == 0;
+        }
         self.cols = cols;
         self.rows = rows;
         self.x = self.x.min(cols - 1);
         self.y = self.y.min(rows - 1);
         self.scroll_top = 0;
         self.scroll_bottom = rows;
+        self.saved_cursor.x = self.saved_cursor.x.min(cols - 1);
+        self.saved_cursor.y = self.saved_cursor.y.min(rows - 1);
+        if let Some(snapshot) = self.saved_primary_cursor.as_mut() {
+            snapshot.x = snapshot.x.min(cols - 1);
+            snapshot.y = snapshot.y.min(rows - 1);
+        }
+        self.wrap_pending = false;
         self.view_offset = 0;
     }
 
     fn put_char(&mut self, ch: char) {
         let width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width == 0 || width > 2 {
-            // TODO: merge combining marks into a grapheme cluster.
+            // TODO: merge combining marks into grapheme clusters.
             return;
         }
+        // A one-column terminal cannot hold a double-width glyph. Using a
+        // single-cell replacement prevents the cursor leaving the grid.
+        let (ch, width) = if width > self.cols { ('?', 1) } else { (ch, width) };
+        // DECAWM wraps on the next printable glyph, not immediately after
+        // painting the last column (the delayed-wrap behavior from st).
+        if self.wrap_pending {
+            if self.auto_wrap {
+                self.x = 0;
+                self.linefeed();
+            }
+            self.wrap_pending = false;
+        }
         if self.x + width > self.cols {
-            self.x = 0;
-            self.linefeed();
+            if self.auto_wrap {
+                self.x = 0;
+                self.linefeed();
+            } else {
+                // Avoid writing half a double-width glyph at the right edge.
+                self.grid[self.y][self.cols - 1] = self.blank();
+                return;
+            }
+        }
+        if self.insert_mode {
+            let count = width.min(self.cols - self.x);
+            let blank = self.blank();
+            let row = &mut self.grid[self.y];
+            row.copy_within(self.x..self.cols - count, self.x + count);
+            row[self.x..self.x + count].fill(blank);
         }
         let (fg, bg) = self.ink_colors();
         self.grid[self.y][self.x] = Cell {
@@ -326,7 +488,12 @@ impl Screen {
                 style: self.style,
             };
         }
-        self.x += width;
+        if self.x + width == self.cols {
+            self.x = self.cols - 1;
+            self.wrap_pending = self.auto_wrap;
+        } else {
+            self.x += width;
+        }
     }
 
     fn erase_line(&mut self, mode: u16) {
@@ -454,15 +621,19 @@ impl Screen {
                 grid: std::mem::replace(&mut self.grid, empty),
                 x: self.x,
                 y: self.y,
+                wrap_pending: self.wrap_pending,
             });
             self.x = 0;
             self.y = 0;
+            self.wrap_pending = false;
             self.view_offset = 0;
         } else if !enable {
             if let Some(saved) = self.alternate.take() {
                 self.grid = saved.grid;
                 self.x = saved.x;
                 self.y = saved.y;
+                self.wrap_pending = saved.wrap_pending;
+                self.view_offset = 0;
             }
         }
     }
@@ -497,12 +668,32 @@ impl Screen {
         out
     }
 
+    fn set_standard_mode(&mut self, mode: u16, enabled: bool) {
+        match mode {
+            2 => self.keyboard_lock = enabled, // KAM
+            4 => self.insert_mode = enabled,  // IRM
+            20 => self.newline_mode = enabled, // LNM
+            _ => {}
+        }
+    }
+
     fn set_private_mode(&mut self, mode: u16, enabled: bool) {
         match mode {
-            1 => self.app_cursor = enabled,
+            1 => self.app_cursor = enabled, // DECCKM
+            5 => self.reverse_video = enabled, // DECSCNM
+            6 => { // DECOM
+                self.origin_mode = enabled;
+                self.home_cursor();
+            }
+            7 => { // DECAWM
+                self.auto_wrap = enabled;
+                if !enabled {
+                    self.wrap_pending = false;
+                }
+            }
             25 => self.show_cursor = enabled,
-            // Like st, tracking modes are mutually exclusive; 1006 only
-            // selects the wire encoding and does not itself enable reports.
+            1004 => self.focus_reporting = enabled,
+            // Existing exclusive mouse mode selection.
             9 | 1000 | 1002 | 1003 => {
                 self.mouse_tracking = if enabled {
                     match mode {
@@ -517,11 +708,33 @@ impl Screen {
                 };
             }
             1006 => self.mouse_sgr = enabled,
-            47 | 1047 | 1049 => self.set_alternate(enabled),
+            47 | 1047 => self.set_alternate(enabled),
+            1048 => {
+                if enabled {
+                    self.save_cursor();
+                } else {
+                    self.restore_cursor();
+                }
+            }
+            1049 => {
+                if enabled {
+                    if !self.in_alternate_screen() {
+                        self.saved_primary_cursor = Some(self.snapshot_cursor());
+                        self.set_alternate(true);
+                        self.home_cursor();
+                    }
+                } else if self.in_alternate_screen() {
+                    self.set_alternate(false);
+                    if let Some(snapshot) = self.saved_primary_cursor.take() {
+                        self.restore_snapshot(snapshot);
+                    }
+                }
+            }
             2004 => self.bracketed_paste = enabled,
-            _ => {}
+            _ => {} // Unsupported DEC modes must not change unrelated state.
         }
     }
+
 }
 
 impl Perform for Screen {
@@ -531,13 +744,21 @@ impl Perform for Screen {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            b'\r' => self.x = 0,
-            b'\n' | 0x0b | 0x0c => self.linefeed(),
-            0x08 => self.x = self.x.saturating_sub(1),
-            b'\t' => {
-                let next = (self.x / 8 + 1) * 8;
-                self.x = next.min(self.cols - 1);
+            b'\r' => {
+                self.x = 0;
+                self.wrap_pending = false;
             }
+            b'\n' | 0x0b | 0x0c => {
+                if self.newline_mode {
+                    self.x = 0;
+                }
+                self.linefeed();
+            }
+            0x08 => {
+                self.x = self.x.saturating_sub(1);
+                self.wrap_pending = false;
+            }
+            b'\t' => self.tab(1),
             _ => {}
         }
     }
@@ -560,25 +781,33 @@ impl Perform for Screen {
             }
             return;
         }
+        if action == 'h' || action == 'l' {
+            for mode in values.iter().copied() {
+                self.set_standard_mode(mode, action == 'h');
+            }
+            return;
+        }
         match action {
-            'A' => self.y = self.y.saturating_sub(n(0)),
-            'B' => self.y = (self.y + n(0)).min(self.rows - 1),
-            'C' => self.x = (self.x + n(0)).min(self.cols - 1),
-            'D' => self.x = self.x.saturating_sub(n(0)),
+            'A' => self.relative_y(-(n(0) as i32)),
+            'B' | 'e' => self.relative_y(n(0) as i32),
+            'C' | 'a' => self.move_to(self.x.saturating_add(n(0)), self.y),
+            'D' => self.move_to(self.x.saturating_sub(n(0)), self.y),
             'E' => {
-                self.y = (self.y + n(0)).min(self.rows - 1);
-                self.x = 0;
+                self.move_to(0, self.y.saturating_add(n(0)));
             }
             'F' => {
-                self.y = self.y.saturating_sub(n(0));
-                self.x = 0;
+                self.move_to(0, self.y.saturating_sub(n(0)));
             }
-            'G' => self.x = (n(0) - 1).min(self.cols - 1),
-            'd' => self.y = (n(0) - 1).min(self.rows - 1),
-            'H' | 'f' => {
-                self.y = (n(0) - 1).min(self.rows - 1);
-                self.x = (n(1) - 1).min(self.cols - 1);
-            }
+            'G' | '\u{60}' => self.move_to(n(0) - 1, self.y),
+            'd' => self.move_to_origin(self.x, n(0) - 1),
+            'H' | 'f' => self.move_to_origin(n(1) - 1, n(0) - 1),
+            'I' => self.tab(n(0) as i32), // CHT
+            'Z' => self.tab(-(n(0) as i32)), // CBT
+            'g' => match values.first().copied().unwrap_or(0) {
+                0 => self.tab_stops[self.x] = false,
+                3 => self.tab_stops.fill(false),
+                _ => {}
+            },
             'J' => self.erase_display(values.first().copied().unwrap_or(0)),
             'K' => self.erase_line(values.first().copied().unwrap_or(0)),
             'm' => self.sgr(if values.is_empty() { &[0] } else { &values }),
@@ -594,16 +823,13 @@ impl Perform for Screen {
                 if top < bottom {
                     self.scroll_top = top;
                     self.scroll_bottom = bottom;
-                    self.x = 0;
-                    self.y = 0;
+                    self.home_cursor();
                 }
             }
-            's' => self.saved_cursor = (self.x, self.y),
-            'u' => {
-                self.x = self.saved_cursor.0.min(self.cols - 1);
-                self.y = self.saved_cursor.1.min(self.rows - 1);
-            }
+            's' => self.save_cursor(),
+            'u' => self.restore_cursor(),
             'P' => {
+                self.wrap_pending = false;
                 let x = self.x.min(self.cols - 1);
                 let blank = self.blank();
                 let count = n(0).min(self.cols - x);
@@ -612,6 +838,7 @@ impl Perform for Screen {
                 line[self.cols - count..].fill(blank);
             }
             '@' => {
+                self.wrap_pending = false;
                 let x = self.x.min(self.cols - 1);
                 let blank = self.blank();
                 let count = n(0).min(self.cols - x);
@@ -620,12 +847,14 @@ impl Perform for Screen {
                 line[x..x + count].fill(blank);
             }
             'X' => {
+                self.wrap_pending = false;
                 let blank = self.blank();
                 let x = self.x.min(self.cols - 1);
                 let end = (x + n(0)).min(self.cols);
                 self.grid[self.y][x..end].fill(blank);
             }
             'L' => {
+                self.wrap_pending = false;
                 if (self.scroll_top..self.scroll_bottom).contains(&self.y) {
                     for _ in 0..n(0).min(self.scroll_bottom - self.y) {
                         self.grid.remove(self.scroll_bottom - 1);
@@ -635,6 +864,7 @@ impl Perform for Screen {
                 }
             }
             'M' => {
+                self.wrap_pending = false;
                 if (self.scroll_top..self.scroll_bottom).contains(&self.y) {
                     for _ in 0..n(0).min(self.scroll_bottom - self.y) {
                         self.grid.remove(self.y);
@@ -645,9 +875,16 @@ impl Perform for Screen {
             }
             'n' => match values.first().copied().unwrap_or(0) {
                 5 => self.replies.extend_from_slice(b"\x1b[0n"),
-                6 => self
-                    .replies
-                    .extend_from_slice(format!("\x1b[{};{}R", self.y + 1, self.x + 1).as_bytes()),
+                6 => {
+                    let reported_y = if self.origin_mode {
+                        self.y - self.scroll_top + 1
+                    } else {
+                        self.y + 1
+                    };
+                    self.replies.extend_from_slice(
+                        format!("\x1b[{};{}R", reported_y, self.x + 1).as_bytes()
+                    );
+                }
                 _ => {}
             },
             'c' => self.replies.extend_from_slice(b"\x1b[?1;2c"),
@@ -668,17 +905,18 @@ impl Perform for Screen {
                 self.linefeed();
             }
             b'M' => {
+                self.wrap_pending = false;
                 if self.y == self.scroll_top {
                     self.scroll_down(1);
                 } else {
                     self.y = self.y.saturating_sub(1);
                 }
             }
-            b'7' => self.saved_cursor = (self.x, self.y),
-            b'8' => {
-                self.x = self.saved_cursor.0.min(self.cols - 1);
-                self.y = self.saved_cursor.1.min(self.rows - 1);
+            b'H' => { // HTS
+                self.tab_stops[self.x] = true;
             }
+            b'7' => self.save_cursor(), // DECSC
+            b'8' => self.restore_cursor(), // DECRC
             b'c' => {
                 let cols = self.cols;
                 let rows = self.rows;
@@ -708,6 +946,10 @@ impl Terminal {
         self.parser.advance(&mut self.screen, bytes);
     }
 }
+
+#[cfg(test)]
+#[path = "vt_modes_tests.rs"]
+mod vt_modes_tests;
 
 #[cfg(test)]
 mod tests {

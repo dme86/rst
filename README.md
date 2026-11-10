@@ -85,6 +85,35 @@ blink_interval_ms = 700
 Set `blink = false` to keep the cursor steady, or adjust
 `blink_interval_ms` between 100 and 3000.
 
+### VT/DEC modes (compatibility milestone)
+
+rst implements the core ANSI/VT100 and DEC mode behavior expected by tmux
+and Neovim. Terminal modes are enabled or disabled with CSI ... h/l.
+
+| Mode / sequence | Behavior |
+| --- | --- |
+| CSI ? 6 h/l | DECOM origin mode; cursor home and row addressing relative to scroll margins |
+| CSI ? 7 h/l | DECAWM deferred auto-wrap or right-margin overwrite |
+| CSI 4 h/l | IRM insert/replace text |
+| CSI 20 h/l | LNM: LF returns to column 1 when enabled |
+| CSI ? 5 h/l | DECSCNM screen-wide reverse video |
+| CSI 2 h/l | KAM keyboard input lock |
+| CSI ? 1004 h/l | Focus in/out reporting (CSI I / CSI O) |
+| CSI ? 1048 h/l | Save and restore cursor position and SGR attributes |
+| CSI ? 47, 1047, 1049 h/l | Alternate screen switching; 1049 additionally saves and restores the primary cursor |
+| ESC 7 / ESC 8, CSI s / CSI u | Cursor save and restore |
+| ESC H, CSI I, CSI Z, CSI g | Set, advance, reverse and clear tab stops |
+
+Tab stops default to every 8 columns and remain configurable during the
+session; resizing preserves custom stops. Scroll margins (CSI top;bottom r)
+interact with origin mode and cursor movement. Delayed auto-wrap ensures text
+does not scroll until a *new* printable character reaches the end of a full row.
+
+See the parser and screen regressions in `src/vt_modes_tests.rs`. This is a
+**core VT/DEC milestone**, not a claim to implement every historical DEC
+extension: character-set switching, DECSLRM and specialized status-line or
+reporting extensions are still pending.
+
 ### SGR text attributes (st compatibility)
 
 rst now stores SGR styling **per terminal cell** (including scrollback and

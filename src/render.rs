@@ -758,7 +758,11 @@ fn paint_backgrounds(
     padding: usize,
     selection: Option<((usize, usize), (usize, usize))>,
 ) {
-    pixels.fill(screen.palette.background);
+    pixels.fill(if screen.reverse_video {
+        screen.palette.foreground
+    } else {
+        screen.palette.background
+    });
     if width == 0 || height == 0 || cell_width == 0 || cell_height == 0 {
         return;
     }
@@ -827,12 +831,17 @@ fn cell_colors(
         && screen.view_offset == 0
         && row == screen.y
         && col == screen.x.min(screen.cols - 1);
-    if cursor {
+    let colors = if cursor {
         (screen.palette.background, screen.palette.cursor)
     } else if selected {
         (cell.fg, screen.palette.selection)
     } else {
         (cell.fg, cell.bg)
+    };
+    if screen.reverse_video {
+        (colors.1, colors.0)
+    } else {
+        colors
     }
 }
 
@@ -944,6 +953,27 @@ mod tests {
         screen.show_cursor = false;
         paint_backgrounds(&mut pixels, 13, 10, &screen, 5, 4, 0, None);
         assert_eq!(pixels[0], 0x112233);
+    }
+
+    #[test]
+    fn dec_reverse_video_swaps_effective_screen_colors() {
+        let mut screen = test_screen();
+        screen.grid[0][0].fg = 0xaabbcc;
+        screen.grid[0][0].bg = 0x112233;
+        assert_eq!(cell_colors(&screen, 0, 0, screen.grid[0][0], None), (0xaabbcc, 0x112233));
+        screen.reverse_video = true;
+        assert_eq!(cell_colors(&screen, 0, 0, screen.grid[0][0], None), (0x112233, 0xaabbcc));
+        // Cursor and selection overlays also reverse, not just stored glyphs.
+        screen.show_cursor = true;
+        assert_eq!(
+            cell_colors(&screen, 0, 0, screen.grid[0][0], None),
+            (screen.palette.cursor, screen.palette.background)
+        );
+        let mut pixels = vec![0u32; 13 * 10];
+        screen.show_cursor = false;
+        paint_backgrounds(&mut pixels, 13, 10, &screen, 5, 4, 0, None);
+        assert_eq!(pixels[0], 0xaabbcc); // reverse video in the first cell
+        assert_eq!(pixels[5], screen.palette.foreground); // default cell swapped
     }
 
     #[test]

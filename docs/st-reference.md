@@ -64,6 +64,19 @@ vendor or translate upstream C source.
 - Unit tests cover state transitions, selective resets, BCE, color interaction,
   pixel decorations and blink suppression.
 
+## Core VT/DEC modes (implemented)
+
+- DECOM (origin), DECAWM (deferred right-margin wrap), IRM, LNM, KAM,
+  DECSCNM (whole-screen reverse), DEC focus tracking (?1004) and existing
+  DECCKM / DECTCEM / mouse / bracketed-paste support
+- DECSTBM scrolling-region bounds and cursor home semantics, cursor
+  addressing relative to margins, DSR cursor-position replies
+- State-driven HTS / CHT / CBT / TBC tab stops; custom stops survive resize
+- DECSC/DECRC and ANSI CSI s/u save/restore full cursor attributes, separate
+  DECSET ?1048 cursor save and ?1049 alternate-screen save/restore
+- Byte-stream parser behavior verified with regression vectors in
+  `src/vt_modes_tests.rs` and reverse-video render tests
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
