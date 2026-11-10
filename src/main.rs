@@ -246,6 +246,10 @@ impl App {
             }
         }
 
+        if self.terminal.screen.keyboard_lock {
+            return; // ANSI KAM (CSI 2 h): suppress PTY keyboard input.
+        }
+
         let bytes = encode_key(
             &key,
             event.physical_key,
@@ -447,10 +451,16 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(event),
-            WindowEvent::Focused(false) => {
-                // A mouse release may be lost when the window loses focus.
-                self.mouse_reporter.reset();
-                self.selecting = false;
+            WindowEvent::Focused(focused) => {
+                // DECSET 1004: notify the child about actual focus changes.
+                if self.terminal.screen.focus_reporting {
+                    self.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+                }
+                if !focused {
+                    // A mouse release may be lost when the window loses focus.
+                    self.mouse_reporter.reset();
+                    self.selecting = false;
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
