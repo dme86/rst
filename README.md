@@ -117,8 +117,9 @@ Clicks (including middle/right and extra mouse buttons), button releases,
 dragging, cursor motion and vertical/horizontal wheel events are forwarded
 to the application only when tracking is active. Normal rst selection and
 scrollback remain unchanged when tracking is off. Hold **Shift** to
-temporarily select text or scroll local history while a TUI is tracking
-the mouse, matching the original st's forced-selection modifier.
+temporarily select text while a TUI is tracking the mouse, matching
+the original st's forced-selection modifier. Shift+wheel uses local scrollback
+on the primary screen; alternate-screen applications do not expose that history.
 
 Wheel events use cell-aware accumulation for smooth trackpad pixel deltas
 on macOS/Wayland. Mouse reports are tested byte-for-byte against the
