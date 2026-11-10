@@ -44,6 +44,7 @@ struct App {
     selection: Option<((usize, usize), (usize, usize))>,
     selecting: bool,
     next_cursor_blink: Instant,
+    next_text_blink: Instant,
 }
 
 impl App {
@@ -323,11 +324,15 @@ fn blink_step(
 
 impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let mut next_deadline: Option<Instant> = None;
+
+        // The cursor and SGR 5/6 text blink on *independent* clocks.
+        // Hiding the cursor with DECTCEM must not freeze blinking text.
         if self.config.cursor.blink
             && self.terminal.screen.show_cursor
             && self.window.is_some()
         {
-            let now = Instant::now();
             let interval = Duration::from_millis(self.config.cursor.blink_interval_ms);
             let (visible, next) = blink_step(
                 self.terminal.screen.cursor_blink_on,
@@ -342,15 +347,38 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             self.next_cursor_blink = next;
-            // Sleep between blink events. No continuous frame loop.
-            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+            next_deadline = Some(next);
         } else {
-            // If a TUI hides the cursor (DECTCEM), don't animate it.
             self.terminal.screen.cursor_blink_on = true;
-            self.next_cursor_blink = Instant::now()
-                + Duration::from_millis(self.config.cursor.blink_interval_ms);
-            event_loop.set_control_flow(ControlFlow::Wait);
+            self.next_cursor_blink =
+                now + Duration::from_millis(self.config.cursor.blink_interval_ms);
         }
+
+        if self.window.is_some() && self.terminal.screen.has_blinking_text() {
+            // st's SGR blinktimeout defaults to 800 ms.
+            let interval = Duration::from_millis(800);
+            let (visible, next) = blink_step(
+                self.terminal.screen.text_blink_on,
+                self.next_text_blink,
+                now,
+                interval,
+            );
+            if visible != self.terminal.screen.text_blink_on {
+                self.terminal.screen.text_blink_on = visible;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            self.next_text_blink = next;
+            next_deadline = Some(next_deadline.map_or(next, |other| other.min(next)));
+        } else {
+            self.terminal.screen.text_blink_on = true;
+            self.next_text_blink = now + Duration::from_millis(800);
+        }
+        // No busy redrawing when the screen has no blinking cells.
+        event_loop.set_control_flow(
+            next_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+        );
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -606,6 +634,7 @@ fn main() -> Result<()> {
         selecting: false,
         next_cursor_blink: Instant::now()
             + Duration::from_millis(config_blink_ms),
+        next_text_blink: Instant::now() + Duration::from_millis(800),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
