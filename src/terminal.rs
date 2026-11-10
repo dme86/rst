@@ -614,15 +614,19 @@ impl Screen {
                 grid: std::mem::replace(&mut self.grid, empty),
                 x: self.x,
                 y: self.y,
+                wrap_pending: self.wrap_pending,
             });
             self.x = 0;
             self.y = 0;
+            self.wrap_pending = false;
             self.view_offset = 0;
         } else if !enable {
             if let Some(saved) = self.alternate.take() {
                 self.grid = saved.grid;
                 self.x = saved.x;
                 self.y = saved.y;
+                self.wrap_pending = saved.wrap_pending;
+                self.view_offset = 0;
             }
         }
     }
@@ -657,12 +661,32 @@ impl Screen {
         out
     }
 
+    fn set_standard_mode(&mut self, mode: u16, enabled: bool) {
+        match mode {
+            2 => self.keyboard_lock = enabled, // KAM
+            4 => self.insert_mode = enabled,  // IRM
+            20 => self.newline_mode = enabled, // LNM
+            _ => {}
+        }
+    }
+
     fn set_private_mode(&mut self, mode: u16, enabled: bool) {
         match mode {
-            1 => self.app_cursor = enabled,
+            1 => self.app_cursor = enabled, // DECCKM
+            5 => self.reverse_video = enabled, // DECSCNM
+            6 => { // DECOM
+                self.origin_mode = enabled;
+                self.home_cursor();
+            }
+            7 => { // DECAWM
+                self.auto_wrap = enabled;
+                if !enabled {
+                    self.wrap_pending = false;
+                }
+            }
             25 => self.show_cursor = enabled,
-            // Like st, tracking modes are mutually exclusive; 1006 only
-            // selects the wire encoding and does not itself enable reports.
+            1004 => self.focus_reporting = enabled,
+            // Existing exclusive mouse mode selection.
             9 | 1000 | 1002 | 1003 => {
                 self.mouse_tracking = if enabled {
                     match mode {
@@ -677,11 +701,33 @@ impl Screen {
                 };
             }
             1006 => self.mouse_sgr = enabled,
-            47 | 1047 | 1049 => self.set_alternate(enabled),
+            47 | 1047 => self.set_alternate(enabled),
+            1048 => {
+                if enabled {
+                    self.save_cursor();
+                } else {
+                    self.restore_cursor();
+                }
+            }
+            1049 => {
+                if enabled {
+                    if !self.in_alternate_screen() {
+                        self.saved_primary_cursor = Some(self.snapshot_cursor());
+                        self.set_alternate(true);
+                        self.home_cursor();
+                    }
+                } else if self.in_alternate_screen() {
+                    self.set_alternate(false);
+                    if let Some(snapshot) = self.saved_primary_cursor.take() {
+                        self.restore_snapshot(snapshot);
+                    }
+                }
+            }
             2004 => self.bracketed_paste = enabled,
-            _ => {}
+            _ => {} // Unsupported DEC modes must not change unrelated state.
         }
     }
+
 }
 
 impl Perform for Screen {
