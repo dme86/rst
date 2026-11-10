@@ -548,6 +548,11 @@ impl ApplicationHandler<UserEvent> for App {
                     // TUI enabling/disabling DEC mouse reporting.
                     self.mouse_reporter.reset();
                     self.selecting = false;
+                    if self.terminal.screen.mouse_tracking.enabled() {
+                        // An old local selection must not overlay a TUI that
+                        // now owns the mouse.
+                        self.selection = None;
+                    }
                 }
                 let replies = self.terminal.screen.take_replies();
                 if !replies.is_empty() {
