@@ -18,6 +18,19 @@ make run
 
 The optional configuration file is `~/.config/rst/config.toml` (or `$XDG_CONFIG_HOME/rst/config.toml`). Defaults are embedded in the executable; see [`config/default.toml`](config/default.toml).
 
+### Keyboard font zoom
+
+Press **Cmd++** or **Cmd+-** on macOS to enlarge or shrink terminal text.
+Use **Cmd+0** to reset to the font size from the configuration you launched
+with. On Linux/Wayland the corresponding shortcuts are **Ctrl++**,
+**Ctrl+-** and **Ctrl+0**. Both `+` and `=` are accepted for zooming in,
+so keyboards that require Shift for a plus sign are supported.
+
+Zoom is temporary for the current window: `config.toml` is unchanged.
+Each step changes the logical font size by 1 point (limits: 6–72).
+The existing window dimensions are retained, while the grid is recalculated
+and the PTY receives a resize notification so tmux and Neovim adapt.
+
 ### Borderless terminal / full-screen TUIs
 
 rst defaults to `[window] padding = 0`: Neovim and other full-screen terminal

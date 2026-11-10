@@ -25,6 +25,7 @@ use crate::{
 
 struct App {
     config: Config,
+    original_font_size: f32,
     terminal: Terminal,
     pty: PtySession,
     context: Context<OwnedDisplayHandle>,
@@ -143,11 +144,54 @@ impl App {
         }
     }
 
+    fn zoom_font(&mut self, action: ZoomAction) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let next_size = zoomed_font_size(
+            self.config.font.size,
+            self.original_font_size,
+            action,
+        );
+        if (next_size - self.config.font.size).abs() < f32::EPSILON {
+            return;
+        }
+
+        // Keep the previous font and renderer if loading the new font fails.
+        let mut next_font = self.config.font.clone();
+        next_font.size = next_size;
+        match Renderer::new(
+            &next_font,
+            self.config.window.padding,
+            window.scale_factor(),
+        ) {
+            Ok(renderer) => {
+                self.renderer = Some(renderer);
+                self.config.font = next_font;
+                // Selection coordinates refer to the old grid.
+                self.selection = None;
+                self.selecting = false;
+                // A new font changes the character-cell dimensions; propagate
+                // the resulting terminal geometry to the PTY/tmux/Neovim.
+                self.resize_terminal();
+            }
+            Err(err) => eprintln!("rst: cannot change font size: {err:#}"),
+        }
+    }
+
     fn handle_key(&mut self, event: KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
         }
         let key = event.logical_key.as_ref();
+        if let Some(action) = zoom_shortcut(
+            &key,
+            self.modifiers,
+            cfg!(target_os = "macos"),
+        ) {
+            self.zoom_font(action);
+            return;
+        }
         let primary = if cfg!(target_os = "macos") {
             self.modifiers.super_key()
         } else {
@@ -247,6 +291,49 @@ impl App {
 
 // winit reports a space as a named key. Generate the same PTY bytes as a
 // printable character, including Ctrl+Space (NUL) and Alt+Space (ESC + space).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZoomAction {
+    In,
+    Out,
+    Reset,
+}
+
+fn zoomed_font_size(current: f32, initial: f32, action: ZoomAction) -> f32 {
+    let size = match action {
+        ZoomAction::In => current + 1.0,
+        ZoomAction::Out => current - 1.0,
+        ZoomAction::Reset => initial,
+    };
+    size.clamp(6.0, 72.0)
+}
+
+/// macOS: Cmd++ / Cmd+- / Cmd+0. Wayland: Ctrl++ / Ctrl+- / Ctrl+0.
+/// '+' and '=' are both accepted because layouts differ in whether '+' needs
+/// Shift. Never send a recognized zoom shortcut to the child PTY.
+fn zoom_shortcut(
+    key: &Key<&str>,
+    modifiers: ModifiersState,
+    is_macos: bool,
+) -> Option<ZoomAction> {
+    let pressed = if is_macos {
+        modifiers.super_key() && !modifiers.control_key()
+    } else {
+        modifiers.control_key() && !modifiers.super_key()
+    };
+    if !pressed || modifiers.alt_key() {
+        return None;
+    }
+    match key {
+        Key::Character(text) => match *text {
+            "+" | "=" => Some(ZoomAction::In),
+            "-" | "_" => Some(ZoomAction::Out),
+            "0" => Some(ZoomAction::Reset),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn space_bytes(control: bool, alt: bool, command: bool) -> &'static [u8] {
     if command {
         b""
@@ -416,8 +503,10 @@ fn main() -> Result<()> {
         config.scrollback.lines,
         palette,
     );
+    let original_font_size = config.font.size;
     let mut app = App {
         config,
+        original_font_size,
         terminal,
         pty,
         context,
@@ -436,6 +525,60 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod keyboard_tests {
     use super::*;
+
+    #[test]
+    fn macos_command_plus_and_minus_are_zoom_shortcuts() {
+        let cmd = ModifiersState::SUPER;
+        for key in ["+", "="] {
+            assert_eq!(
+                zoom_shortcut(&Key::Character(key), cmd, true),
+                Some(ZoomAction::In)
+            );
+        }
+        for key in ["-", "_"] {
+            assert_eq!(
+                zoom_shortcut(&Key::Character(key), cmd, true),
+                Some(ZoomAction::Out)
+            );
+        }
+        assert_eq!(
+            zoom_shortcut(&Key::Character("0"), cmd, true),
+            Some(ZoomAction::Reset)
+        );
+    }
+
+    #[test]
+    fn zoom_shortcuts_only_handle_the_platform_modifier() {
+        let ctrl = ModifiersState::CONTROL;
+        let cmd = ModifiersState::SUPER;
+        assert_eq!(
+            zoom_shortcut(&Key::Character("+"), ctrl, false),
+            Some(ZoomAction::In)
+        );
+        assert_eq!(zoom_shortcut(&Key::Character("+"), ctrl, true), None);
+        assert_eq!(zoom_shortcut(&Key::Character("+"), cmd, false), None);
+        assert_eq!(
+            zoom_shortcut(
+                &Key::Character("+"),
+                cmd | ModifiersState::ALT,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            zoom_shortcut(&Key::Character("x"), cmd, true),
+            None
+        );
+    }
+
+    #[test]
+    fn font_zoom_changes_size_and_can_reset_to_configured_value() {
+        assert_eq!(zoomed_font_size(15.0, 15.0, ZoomAction::In), 16.0);
+        assert_eq!(zoomed_font_size(16.0, 15.0, ZoomAction::Out), 15.0);
+        assert_eq!(zoomed_font_size(23.0, 16.5, ZoomAction::Reset), 16.5);
+        assert_eq!(zoomed_font_size(72.0, 15.0, ZoomAction::In), 72.0);
+        assert_eq!(zoomed_font_size(6.0, 15.0, ZoomAction::Out), 6.0);
+    }
 
     #[test]
     fn space_sends_ascii_space_to_pty() {
