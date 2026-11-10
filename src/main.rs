@@ -380,7 +380,10 @@ fn main() -> Result<()> {
     let palette = Palette::try_from(&config.colors)?;
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let context = Context::new(event_loop.owned_display_handle())?;
+    // softbuffer's platform error holds non-Send raw window handles.
+    // Convert it into an owned diagnostic before passing through anyhow.
+    let context = Context::new(event_loop.owned_display_handle())
+        .map_err(|err| anyhow::anyhow!("cannot initialize display: {err}"))?;
     let pty = PtySession::start(
         config.window.columns,
         config.window.rows,

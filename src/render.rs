@@ -243,7 +243,7 @@ fn rect(
 
 fn blend(fg: u32, bg: u32, alpha: u8) -> u32 {
     let a = alpha as u32;
-    let mix = |shift| {
+    let mix = |shift: u32| {
         let f = (fg >> shift) & 0xff;
         let b = (bg >> shift) & 0xff;
         (f * a + b * (255 - a)) / 255

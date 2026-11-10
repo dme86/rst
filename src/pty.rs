@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize, PtySystem};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use winit::event_loop::EventLoopProxy;
 
 #[derive(Debug)]
