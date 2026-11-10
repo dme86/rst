@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use fontdb::{Database, Family, Query};
+use fontdb::{Database, Family, Query, Style, Weight};
 use fontdue::{Font, FontSettings, Metrics};
 
 use crate::{
     config::FontConfig,
-    terminal::{Cell, Screen},
+    terminal::{Cell, Screen, TextStyle},
 };
 
 struct Glyph {
@@ -14,9 +14,47 @@ struct Glyph {
     bitmap: Vec<u8>,
 }
 
+/// Pick a real bold/italic font face when the installed family provides it.
+/// If a family has no such face, the draw stage synthesizes the missing
+/// attribute rather than silently rendering a regular glyph.
+fn load_style_face(
+    db: &Database,
+    families: &[Family<'_>],
+    bold: bool,
+    italic: bool,
+) -> Option<Font> {
+    let query = Query {
+        families,
+        weight: if bold { Weight::BOLD } else { Weight::NORMAL },
+        style: if italic { Style::Italic } else { Style::Normal },
+        ..Query::default()
+    };
+    let id = db.query(&query)?;
+    let face = db.face(id)?;
+    if bold && face.weight.0 < 600 {
+        return None;
+    }
+    if italic && face.style == Style::Normal {
+        return None;
+    }
+    db.with_face_data(id, |data, index| {
+        Font::from_bytes(
+            data.to_vec(),
+            FontSettings {
+                collection_index: index,
+                ..FontSettings::default()
+            },
+        )
+        .ok()
+    })
+    .flatten()
+}
+
 pub struct Renderer {
     fonts: Vec<Font>,
-    glyphs: HashMap<(usize, char), Glyph>,
+    // For each regular fallback face: bold, italic, bold-italic variants.
+    styled_fonts: Vec<[Option<Font>; 3]>,
+    glyphs: HashMap<(usize, u8, char), Glyph>,
     // Only used when RST_DEBUG_FONTS=1 to avoid repeatedly reporting a codepoint.
     missing_glyphs: HashSet<char>,
     debug_fonts: bool,
@@ -34,6 +72,7 @@ impl Renderer {
         let mut db = Database::new();
         db.load_system_fonts();
         let mut fonts = Vec::new();
+        let mut styled_fonts = Vec::new();
         let mut loaded = Vec::new();
         let mut seen = HashSet::new();
         let debug_fonts = std::env::var_os("RST_DEBUG_FONTS").is_some();
@@ -59,6 +98,12 @@ impl Renderer {
                 })
                 .flatten()
             }) {
+                let family_query = [Family::Name(family)];
+                styled_fonts.push([
+                    load_style_face(&db, &family_query, true, false),
+                    load_style_face(&db, &family_query, false, true),
+                    load_style_face(&db, &family_query, true, true),
+                ]);
                 fonts.push(font);
                 loaded.push(family.to_string());
             } else if debug_fonts {
@@ -85,6 +130,12 @@ impl Renderer {
                 })
                 .flatten()
             }) {
+                let family_query = [Family::Monospace];
+                styled_fonts.push([
+                    load_style_face(&db, &family_query, true, false),
+                    load_style_face(&db, &family_query, false, true),
+                    load_style_face(&db, &family_query, true, true),
+                ]);
                 fonts.push(font);
                 loaded.push("system monospace".to_string());
             }
@@ -103,6 +154,7 @@ impl Renderer {
 
         Ok(Self {
             fonts,
+            styled_fonts,
             glyphs: HashMap::new(),
             missing_glyphs: HashSet::new(),
             debug_fonts,
@@ -136,21 +188,46 @@ impl Renderer {
         self.glyphs.clear();
     }
 
-    fn glyph(&mut self, ch: char) -> &Glyph {
+    /// Returns bitmap plus whether bold / italic should be synthesized.
+    /// Style choice is cached independently to avoid mixing glyph variants.
+    fn glyph(&mut self, ch: char, style: TextStyle) -> (&Glyph, bool, bool) {
         let matched = self.fonts.iter().position(|font| font.has_glyph(ch));
-        if matched.is_none()
-            && self.debug_fonts
-            && self.missing_glyphs.insert(ch)
-        {
+        if matched.is_none() && self.debug_fonts && self.missing_glyphs.insert(ch) {
             eprintln!("rst: missing glyph U+{:04X} ({:?}) in configured fonts", ch as u32, ch);
         }
         let index = matched.unwrap_or(0);
-        let font = &self.fonts[index];
+        let bold = style.contains(TextStyle::BOLD);
+        let italic = style.contains(TextStyle::ITALIC);
+        let candidate_variants: &[u8] = match (bold, italic) {
+            (true, true) => &[3, 2, 1],
+            (true, false) => &[1],
+            (false, true) => &[2],
+            (false, false) => &[],
+        };
+        let variant = candidate_variants
+            .iter()
+            .copied()
+            .find(|&variant| {
+                self.styled_fonts[index][variant as usize - 1]
+                    .as_ref()
+                    .is_some_and(|font| font.has_glyph(ch))
+            })
+            .unwrap_or(0);
+        let face = if variant == 0 {
+            &self.fonts[index]
+        } else {
+            self.styled_fonts[index][variant as usize - 1]
+                .as_ref()
+                .expect("style variant was checked")
+        };
+        let synth_bold = bold && variant != 1 && variant != 3;
+        let synth_italic = italic && variant != 2 && variant != 3;
         let size = self.font_size;
-        self.glyphs.entry((index, ch)).or_insert_with(|| {
-            let (metrics, bitmap) = font.rasterize(ch, size);
+        let glyph = self.glyphs.entry((index, variant, ch)).or_insert_with(|| {
+            let (metrics, bitmap) = face.rasterize(ch, size);
             Glyph { metrics, bitmap }
-        })
+        });
+        (glyph, synth_bold, synth_italic)
     }
 
     /// Draw all backgrounds first, then all glyphs. Painting each cell's
