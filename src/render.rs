@@ -285,16 +285,29 @@ impl Renderer {
                 break;
             }
             for (col, &cell) in screen.display_row(row).iter().enumerate() {
-                if cell.width == 0 || cell.ch == ' ' {
+                if cell.width == 0 {
                     continue;
                 }
                 let x = self.padding + col * self.cell_width;
                 if x >= width {
                     break;
                 }
-                let (fg, _) = cell_colors(screen, row, col, cell, selection);
-                let spill = icon_spill(screen, row, col, cell, selection, self.cell_width);
-                self.draw_glyph(pixels, width, height, x, y, cell, fg, spill);
+                if !cell.style.visible(screen.text_blink_on) {
+                    continue;
+                }
+                let (fg, bg) = cell_colors(screen, row, col, cell, selection);
+                let ink = effective_ink_color(cell.style, fg, bg);
+                if cell.ch != ' ' {
+                    let spill = icon_spill(screen, row, col, cell, selection, self.cell_width);
+                    self.draw_glyph(pixels, width, height, x, y, cell, ink, spill);
+                }
+                // Underline and strikethrough continue through spaces, just
+                // like st. Draw after glyphs so the decoration is visible.
+                paint_decorations(
+                    pixels, width, height, x, y,
+                    self.cell_width * cell.width as usize,
+                    self.cell_height, self.ascent, self.font_size, cell.style, ink,
+                );
             }
         }
     }
@@ -322,7 +335,7 @@ impl Renderer {
             draw_powerline(pixels, width, height, x, y, slot_w, slot_h, cell.ch, fg);
             return;
         }
-        let glyph = self.glyph(cell.ch);
+        let (glyph, synthetic_bold, synthetic_italic) = self.glyph(cell.ch, cell.style);
         if glyph.metrics.width == 0 || glyph.metrics.height == 0 {
             return;
         }
@@ -349,9 +362,17 @@ impl Renderer {
                 break;
             }
             for dx in 0..placement.width {
-                let target_x = placement.x + dx;
-                if target_x >= width {
-                    break;
+                // Prefer true font variants; if the family has no Italic
+                // face, lightly shear the bitmap without touching the cell
+                // geometry or the fixed-width terminal grid.
+                let slant = if synthetic_italic && ink.is_none() {
+                    (placement.height.saturating_sub(dy + 1) / 7).min(3)
+                } else {
+                    0
+                };
+                let target_x = placement.x + dx + slant;
+                if target_x >= width || (synthetic_italic && target_x >= x + slot_w) {
+                    continue;
                 }
                 let alpha = match ink {
                     Some(bounds) => sample_glyph_rect(
@@ -366,11 +387,62 @@ impl Renderer {
                 // Blend against the real framebuffer pixel so an overhanging
                 // glyph cannot accidentally re-introduce its own background.
                 pixels[index] = blend(fg, pixels[index], alpha);
+                if synthetic_bold && target_x + 1 < width && target_x + 1 < x + slot_w {
+                    // A one-pixel emboldening pass when no real bold face
+                    // exists. Keep the extra stroke inside the cell.
+                    let next = index + 1;
+                    pixels[next] = blend(fg, pixels[next], alpha);
+                }
             }
         }
     }
 }
 
+
+/// Faint is drawn by blending foreground into the *effective* background,
+/// including selection or cursor highlighting; no opaque dark overlay.
+fn effective_ink_color(style: TextStyle, fg: u32, bg: u32) -> u32 {
+    if style.contains(TextStyle::FAINT) {
+        blend(fg, bg, 128)
+    } else {
+        fg
+    }
+}
+
+/// Decorations are independent of the glyph bitmap. In particular underlines
+/// must continue across spaces and remain visible on missing-glyph cells.
+#[allow(clippy::too_many_arguments)]
+fn paint_decorations(
+    pixels: &mut [u32],
+    stride: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    cell_height: usize,
+    ascent: i32,
+    font_size: f32,
+    style: TextStyle,
+    color: u32,
+) {
+    if cell_height == 0 || width == 0 || (!style.contains(TextStyle::UNDERLINE)
+        && !style.contains(TextStyle::STRUCK))
+    {
+        return;
+    }
+    let thickness = ((font_size / 18.0).round() as usize).clamp(1, 3).min(cell_height);
+    let vertical_offset = ((cell_height as i32 - font_size.ceil() as i32).max(0)) / 2;
+    let baseline = (ascent + vertical_offset).clamp(0, cell_height as i32 - 1);
+    let max_y = cell_height - thickness;
+    if style.contains(TextStyle::UNDERLINE) {
+        let at = (baseline + 1).max(0) as usize;
+        rect(pixels, stride, height, x, y + at.min(max_y), width, thickness, color);
+    }
+    if style.contains(TextStyle::STRUCK) {
+        let at = (baseline - ascent / 3).max(0) as usize;
+        rect(pixels, stride, height, x, y + at.min(max_y), width, thickness, color);
+    }
+}
 
 /// Cell geometry derived from the primary face for a chosen pixel size.
 /// Used identically at initialization and when changing the font size.
@@ -977,7 +1049,7 @@ mod tests {
         let font_count = renderer.fonts.len();
         let original_height = renderer.cell_height;
         let original_size = renderer.font_size;
-        renderer.glyph('M');
+        renderer.glyph('M', TextStyle::default());
         assert!(!renderer.glyphs.is_empty());
 
         renderer.set_font_size(config.font.size + 3.0, 1.0);
@@ -987,7 +1059,7 @@ mod tests {
         assert!(renderer.glyphs.is_empty());
 
         // Same-size calls should not invalidate freshly rasterized glyphs.
-        renderer.glyph('M');
+        renderer.glyph('M', TextStyle::default());
         renderer.set_font_size(config.font.size + 3.0, 1.0);
         assert!(!renderer.glyphs.is_empty());
     }
