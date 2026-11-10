@@ -18,6 +18,12 @@ make run
 
 The optional configuration file is `~/.config/rst/config.toml` (or `$XDG_CONFIG_HOME/rst/config.toml`). Defaults are embedded in the executable; see [`config/default.toml`](config/default.toml).
 
+### Default colors
+
+The bundled default terminal background is `#282828`. If your existing
+`~/.config/rst/config.toml` overrides `[colors] background`, that user value
+continues to take precedence; change or remove it to use the new default.
+
 ### Keyboard font zoom
 
 Press **Cmd++** or **Cmd+-** on macOS to enlarge or shrink terminal text.
@@ -28,8 +34,12 @@ so keyboards that require Shift for a plus sign are supported.
 
 Zoom is temporary for the current window: `config.toml` is unchanged.
 Each step changes the logical font size by 1 point (limits: 6–72).
-The existing window dimensions are retained, while the grid is recalculated
-and the PTY receives a resize notification so tmux and Neovim adapt.
+The renderer reuses the installed font faces already loaded at startup; only
+size-dependent metrics and rasterized glyphs are refreshed. This prevents
+the roughly one-second pause previously caused by scanning all system fonts
+on every zoom keypress. The existing window dimensions are retained, while
+the grid is recalculated and the PTY receives a resize notification so
+tmux and Neovim adapt.
 
 ### Borderless terminal / full-screen TUIs
 

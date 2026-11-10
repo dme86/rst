@@ -113,6 +113,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bundled_default_uses_requested_background() {
+        let defaults: Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert_eq!(defaults.colors.background, "#282828");
+    }
+
+    #[test]
     fn default_window_has_no_outer_padding() {
         let config: Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();

@@ -157,26 +157,18 @@ impl App {
             return;
         }
 
-        // Keep the previous font and renderer if loading the new font fails.
-        let mut next_font = self.config.font.clone();
-        next_font.size = next_size;
-        match Renderer::new(
-            &next_font,
-            self.config.window.padding,
-            window.scale_factor(),
-        ) {
-            Ok(renderer) => {
-                self.renderer = Some(renderer);
-                self.config.font = next_font;
-                // Selection coordinates refer to the old grid.
-                self.selection = None;
-                self.selecting = false;
-                // A new font changes the character-cell dimensions; propagate
-                // the resulting terminal geometry to the PTY/tmux/Neovim.
-                self.resize_terminal();
-            }
-            Err(err) => eprintln!("rst: cannot change font size: {err:#}"),
-        }
+        // Fonts were discovered and parsed when the window was created.
+        // Zoom changes only their metrics and cached glyph bitmaps: no new
+        // fontdb::load_system_fonts() scan on the UI event loop.
+        let scale = window.scale_factor();
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        renderer.set_font_size(next_size, scale);
+        self.config.font.size = next_size;
+        self.selection = None;
+        self.selecting = false;
+        self.resize_terminal();
     }
 
     fn handle_key(&mut self, event: KeyEvent) {
@@ -402,16 +394,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => self.resize_terminal(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                match Renderer::new(
-                    &self.config.font,
-                    self.config.window.padding,
-                    scale_factor,
-                ) {
-                    Ok(renderer) => {
-                        self.renderer = Some(renderer);
-                        self.resize_terminal();
-                    }
-                    Err(err) => eprintln!("rst: font reinitialization failed: {err:#}"),
+                if let Some(renderer) = self.renderer.as_mut() {
+                    // Retina/HiDPI changes also reuse the font faces.
+                    renderer.set_font_size(self.config.font.size, scale_factor);
+                    renderer.padding =
+                        (self.config.window.padding as f64 * scale_factor) as usize;
+                    self.resize_terminal();
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),

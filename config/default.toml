@@ -32,7 +32,7 @@ copy_on_select = false
 
 [colors]
 foreground = "#cdd6f4"
-background = "#1e1e2e"
+background = "#282828"
 cursor = "#f5e0dc"
 selection = "#45475a"
 palette = [

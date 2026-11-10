@@ -98,22 +98,8 @@ impl Renderer {
             .first()
             .context("no usable monospace font found; install Menlo or a Nerd Font")?;
         let font_size = (config.size as f64 * scale) as f32;
-        let line = primary.horizontal_line_metrics(font_size);
-        let cell_width = primary.metrics('M', font_size).advance_width.ceil().max(1.0) as usize;
-        let cell_height = line
-            .map(|line| line.new_line_size.ceil().max(font_size * 1.2) as usize)
-            .unwrap_or((font_size * 1.35).ceil() as usize)
-            .max(1);
-        let ascent = line
-            .map(|line| line.ascent.ceil() as i32)
-            .unwrap_or(font_size.ceil() as i32);
-        // Match icons to the visible lower edge of normal text, rather than
-        // the vertical centre of the entire terminal cell.  'x' has no
-        // descender and is a stable reference across monospace families.
-        // fontdue::Metrics::ymin is the bottom bearing from the baseline.
-        let text_ink_bottom = ascent
-            + (cell_height as i32 - font_size.ceil() as i32).max(0) / 2
-            - primary.metrics('x', font_size).ymin;
+        let (cell_width, cell_height, ascent, text_ink_bottom) =
+            font_cell_metrics(primary, font_size);
 
         Ok(Self {
             fonts,
@@ -127,6 +113,27 @@ impl Renderer {
             ascent,
             text_ink_bottom,
         })
+    }
+
+    /// Resize the already loaded font faces. Rescanning macOS Font Book or
+    /// Linux font directories on *every* Cmd+/Cmd- used to stall the UI for
+    /// up to a second. Cached rasterized glyphs do need invalidating, but
+    /// font discovery and parsing should only happen at startup.
+    pub fn set_font_size(&mut self, logical_size: f32, scale: f64) {
+        let pixel_size = (logical_size as f64 * scale) as f32;
+        if (self.font_size - pixel_size).abs() < f32::EPSILON {
+            return;
+        }
+        let (cell_width, cell_height, ascent, text_ink_bottom) =
+            font_cell_metrics(&self.fonts[0], pixel_size);
+        self.font_size = pixel_size;
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
+        self.ascent = ascent;
+        self.text_ink_bottom = text_ink_bottom;
+        // Previously rasterized pixels belong to a different font size.
+        // Keep parsed font faces and fallback order; only discard bitmaps.
+        self.glyphs.clear();
     }
 
     fn glyph(&mut self, ch: char) -> &Glyph {
@@ -287,6 +294,25 @@ impl Renderer {
     }
 }
 
+
+/// Cell geometry derived from the primary face for a chosen pixel size.
+/// Used identically at initialization and when changing the font size.
+fn font_cell_metrics(font: &Font, font_size: f32) -> (usize, usize, i32, i32) {
+    let line = font.horizontal_line_metrics(font_size);
+    let cell_width = font.metrics('M', font_size).advance_width.ceil().max(1.0) as usize;
+    let cell_height = line
+        .map(|line| line.new_line_size.ceil().max(font_size * 1.2) as usize)
+        .unwrap_or((font_size * 1.35).ceil() as usize)
+        .max(1);
+    let ascent = line
+        .map(|line| line.ascent.ceil() as i32)
+        .unwrap_or(font_size.ceil() as i32);
+    // The visual bottom of lowercase 'x' also anchors Nerd Font icons.
+    let text_ink_bottom = ascent
+        + (cell_height as i32 - font_size.ceil() as i32).max(0) / 2
+        - font.metrics('x', font_size).ymin;
+    (cell_width, cell_height, ascent, text_ink_bottom)
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct Placement {
@@ -836,6 +862,33 @@ mod tests {
         let rect = place_glyph(&metrics, 12, 30, 13, 24, 18, true);
         assert_eq!(rect, Placement { x: 12, y: 30, width: 13, height: 24 });
         assert!(is_powerline_separator('\u{e0b0}'));
+    }
+
+    #[test]
+    fn font_zoom_reuses_loaded_font_faces_and_clears_glyph_cache() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        // Host font availability varies: this test exercises the actual
+        // renderer whenever the machine has a suitable monospace font.
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else {
+            return;
+        };
+        let font_count = renderer.fonts.len();
+        let original_height = renderer.cell_height;
+        let original_size = renderer.font_size;
+        renderer.glyph('M');
+        assert!(!renderer.glyphs.is_empty());
+
+        renderer.set_font_size(config.font.size + 3.0, 1.0);
+        assert_eq!(renderer.fonts.len(), font_count);
+        assert!(renderer.font_size > original_size);
+        assert!(renderer.cell_height >= original_height);
+        assert!(renderer.glyphs.is_empty());
+
+        // Same-size calls should not invalidate freshly rasterized glyphs.
+        renderer.glyph('M');
+        renderer.set_font_size(config.font.size + 3.0, 1.0);
+        assert!(!renderer.glyphs.is_empty());
     }
 
     #[test]
