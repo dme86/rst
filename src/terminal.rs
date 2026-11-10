@@ -97,6 +97,7 @@ struct SavedScreen {
 struct CursorSnapshot {
     x: usize,
     y: usize,
+    wrap_pending: bool,
     fg: u32,
     bg: u32,
     style: TextStyle,
@@ -189,6 +190,7 @@ impl Screen {
             saved_cursor: CursorSnapshot {
                 x: 0,
                 y: 0,
+                wrap_pending: false,
                 fg: blank.fg,
                 bg: blank.bg,
                 style: TextStyle::default(),
@@ -204,6 +206,7 @@ impl Screen {
         CursorSnapshot {
             x: self.x.min(self.cols - 1),
             y: self.y.min(self.rows - 1),
+            wrap_pending: self.wrap_pending,
             fg: self.fg,
             bg: self.bg,
             style: self.style,
@@ -227,7 +230,7 @@ impl Screen {
         self.fg = saved.fg;
         self.bg = saved.bg;
         self.style = saved.style;
-        self.wrap_pending = false;
+        self.wrap_pending = self.auto_wrap && saved.wrap_pending && self.x + 1 == self.cols;
     }
 
     /// Absolute cursor movement clamps to DECOM's scrolling region.
