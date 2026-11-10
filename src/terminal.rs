@@ -90,6 +90,17 @@ struct SavedScreen {
     grid: Vec<Vec<Cell>>,
     x: usize,
     y: usize,
+    wrap_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CursorSnapshot {
+    x: usize,
+    y: usize,
+    fg: u32,
+    bg: u32,
+    style: TextStyle,
+    origin_mode: bool,
 }
 
 pub struct Screen {
@@ -110,6 +121,13 @@ pub struct Screen {
     pub mouse_tracking: MouseTracking,
     pub mouse_sgr: bool,
     pub bracketed_paste: bool,
+    pub focus_reporting: bool,
+    pub keyboard_lock: bool,
+    pub reverse_video: bool,
+    pub origin_mode: bool,
+    pub auto_wrap: bool,
+    pub insert_mode: bool,
+    pub newline_mode: bool,
     pub palette: Palette,
     fg: u32,
     bg: u32,
@@ -117,7 +135,10 @@ pub struct Screen {
     history_limit: usize,
     scroll_top: usize,
     scroll_bottom: usize,
-    saved_cursor: (usize, usize),
+    tab_stops: Vec<bool>,
+    wrap_pending: bool,
+    saved_cursor: CursorSnapshot,
+    saved_primary_cursor: Option<CursorSnapshot>,
     alternate: Option<SavedScreen>,
     replies: Vec<u8>,
 }
@@ -149,6 +170,13 @@ impl Screen {
             mouse_tracking: MouseTracking::Off,
             mouse_sgr: false,
             bracketed_paste: false,
+            focus_reporting: false,
+            keyboard_lock: false,
+            reverse_video: false,
+            origin_mode: false,
+            auto_wrap: true,
+            insert_mode: false,
+            newline_mode: false,
             fg: palette.foreground,
             bg: palette.background,
             style: TextStyle::default(),
@@ -156,9 +184,99 @@ impl Screen {
             history_limit,
             scroll_top: 0,
             scroll_bottom: rows,
-            saved_cursor: (0, 0),
+            tab_stops: (0..cols).map(|col| col != 0 && col % 8 == 0).collect(),
+            wrap_pending: false,
+            saved_cursor: CursorSnapshot {
+                x: 0,
+                y: 0,
+                fg: palette.foreground,
+                bg: palette.background,
+                style: TextStyle::default(),
+                origin_mode: false,
+            },
+            saved_primary_cursor: None,
             alternate: None,
             replies: Vec::new(),
+        }
+    }
+
+    fn snapshot_cursor(&self) -> CursorSnapshot {
+        CursorSnapshot {
+            x: self.x.min(self.cols - 1),
+            y: self.y.min(self.rows - 1),
+            fg: self.fg,
+            bg: self.bg,
+            style: self.style,
+            origin_mode: self.origin_mode,
+        }
+    }
+
+    fn save_cursor(&mut self) {
+        self.saved_cursor = self.snapshot_cursor();
+    }
+
+    fn restore_cursor(&mut self) {
+        let saved = self.saved_cursor;
+        self.restore_snapshot(saved);
+    }
+
+    fn restore_snapshot(&mut self, saved: CursorSnapshot) {
+        self.origin_mode = saved.origin_mode;
+        self.x = saved.x.min(self.cols - 1);
+        self.y = saved.y.min(self.rows - 1);
+        self.fg = saved.fg;
+        self.bg = saved.bg;
+        self.style = saved.style;
+        self.wrap_pending = false;
+    }
+
+    /// Absolute cursor movement clamps to DECOM's scrolling region.
+    fn move_to(&mut self, x: usize, y: usize) {
+        self.x = x.min(self.cols - 1);
+        let (top, bottom) = if self.origin_mode {
+            (self.scroll_top, self.scroll_bottom)
+        } else {
+            (0, self.rows)
+        };
+        self.y = y.clamp(top, bottom - 1);
+        self.wrap_pending = false;
+    }
+
+    /// CUP/HVP and VPA are relative to the top margin in origin mode.
+    fn move_to_origin(&mut self, x: usize, y: usize) {
+        let absolute_y = if self.origin_mode {
+            self.scroll_top.saturating_add(y)
+        } else {
+            y
+        };
+        self.move_to(x, absolute_y);
+    }
+
+    fn home_cursor(&mut self) {
+        self.move_to_origin(0, 0);
+    }
+
+    fn relative_y(&mut self, lines: i32) {
+        let y = if lines >= 0 {
+            self.y.saturating_add(lines as usize)
+        } else {
+            self.y.saturating_sub(lines.unsigned_abs() as usize)
+        };
+        self.move_to(self.x, y);
+    }
+
+    fn tab(&mut self, steps: i32) {
+        self.wrap_pending = false;
+        if steps > 0 {
+            for _ in 0..steps {
+                let next = (self.x + 1..self.cols).find(|&col| self.tab_stops[col]);
+                self.x = next.unwrap_or(self.cols - 1);
+            }
+        } else {
+            for _ in steps..0 {
+                let prev = (0..self.x).rev().find(|&col| self.tab_stops[col]);
+                self.x = prev.unwrap_or(0);
+            }
         }
     }
 
