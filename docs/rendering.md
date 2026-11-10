@@ -21,6 +21,21 @@ terminal cursor movement. The renderer now maintains these invariants:
 The placement and Powerline geometry have unit tests in `src/render.rs`.
 Background Color Erase has a regression test in `src/terminal.rs`.
 
+## Optical alignment of Nerd Font icons
+
+Nerd Font icons are Unicode private-use glyphs, not ordinary letterforms.
+Their rasterizer metrics can have different bearings and baselines from the
+primary text font. rst therefore calculates the non-transparent *ink bounds*
+of each private-use icon, centers that region vertically in the cell and
+scales it proportionally to the available space. A conservative amount of
+horizontal overflow is permitted only into immediately neighboring **blank
+cells of the same background color**. Regular letters are unchanged, and
+Powerline separators keep their full-cell vector rendering.
+
+This is a rendering/layout heuristic, not a general Unicode shaping solution.
+Tests cover supplemental private-use icons (including U+F10FE), visible-alpha
+bounds, centering and avoidance of collisions with neighboring text.
+
 ## Known limits
 
 This is still an early terminal emulator, not a full Unicode shaping engine.

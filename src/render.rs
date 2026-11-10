@@ -199,7 +199,8 @@ impl Renderer {
                     break;
                 }
                 let (fg, _) = cell_colors(screen, row, col, cell, selection);
-                self.draw_glyph(pixels, width, height, x, y, cell, fg);
+                let spill = icon_spill(screen, row, col, cell, selection, self.cell_width);
+                self.draw_glyph(pixels, width, height, x, y, cell, fg, spill);
             }
         }
     }
@@ -214,6 +215,7 @@ impl Renderer {
         y: usize,
         cell: Cell,
         fg: u32,
+        spill: (usize, usize),
     ) {
         let baseline = self.ascent
             + (self.cell_height as i32 - self.font_size.ceil() as i32).max(0) / 2;
@@ -231,15 +233,21 @@ impl Renderer {
         }
         // The terminal grid, not the font's reported advance, owns cell width.
         // Oversized Nerd Font symbols are fitted rather than silently cut off.
-        let placement = place_glyph(
-            &glyph.metrics,
-            x,
-            y,
-            slot_w,
-            slot_h,
-            baseline,
-            is_powerline_separator(cell.ch),
-        );
+        let icon = is_nerd_icon(cell.ch);
+        let ink = if icon { visible_ink_bounds(glyph) } else { None };
+        let placement = if let Some(bounds) = ink {
+            place_icon(bounds, x, y, slot_w, slot_h, spill)
+        } else {
+            place_glyph(
+                &glyph.metrics,
+                x,
+                y,
+                slot_w,
+                slot_h,
+                baseline,
+                is_powerline_separator(cell.ch),
+            )
+        };
         for dy in 0..placement.height {
             let target_y = placement.y + dy;
             if target_y >= height {
@@ -250,7 +258,12 @@ impl Renderer {
                 if target_x >= width {
                     break;
                 }
-                let alpha = sample_glyph(glyph, dx, dy, placement.width, placement.height);
+                let alpha = match ink {
+                    Some(bounds) => sample_glyph_rect(
+                        glyph, bounds, dx, dy, placement.width, placement.height,
+                    ),
+                    None => sample_glyph(glyph, dx, dy, placement.width, placement.height),
+                };
                 if alpha == 0 {
                     continue;
                 }
@@ -270,6 +283,142 @@ struct Placement {
     y: usize,
     width: usize,
     height: usize,
+}
+
+/// Standard Nerd Font icons live in Unicode's private-use ranges. Do not
+/// apply icon layout to Powerline drawing characters: those need to align
+/// with the cell edges, not be optically centered.
+fn is_nerd_icon(ch: char) -> bool {
+    let point = ch as u32;
+    (0xe000..=0xf8ff).contains(&point) && !(0xe0a0..=0xe0d7).contains(&point)
+        || (0xf0000..=0xffffd).contains(&point)
+        || (0x100000..=0x10fffd).contains(&point)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InkBounds {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+/// Some patched fonts carry large transparent bearings around their icons.
+/// Use the visible alpha coverage, not the font's nominal glyph rectangle.
+fn visible_ink_bounds(glyph: &Glyph) -> Option<InkBounds> {
+    let w = glyph.metrics.width;
+    let h = glyph.metrics.height;
+    if w == 0 || h == 0 || glyph.bitmap.len() < w * h {
+        return None;
+    }
+    let mut left = w;
+    let mut top = h;
+    let mut right = 0;
+    let mut bottom = 0;
+    let mut found = false;
+    for y in 0..h {
+        for x in 0..w {
+            if glyph.bitmap[y * w + x] > 12 {
+                left = left.min(x);
+                top = top.min(y);
+                right = right.max(x);
+                bottom = bottom.max(y);
+                found = true;
+            }
+        }
+    }
+    found.then_some(InkBounds {
+        x: left,
+        y: top,
+        width: right.saturating_sub(left) + 1,
+        height: bottom.saturating_sub(top) + 1,
+    })
+}
+
+/// An icon can use a little of a neighboring empty cell, but never draw
+/// over adjacent letters, cursor cells or different background colors.
+fn icon_spill(
+    screen: &Screen,
+    row: usize,
+    col: usize,
+    cell: Cell,
+    selection: Option<((usize, usize), (usize, usize))>,
+    cell_width: usize,
+) -> (usize, usize) {
+    if !is_nerd_icon(cell.ch) {
+        return (0, 0);
+    }
+    let line = screen.display_row(row);
+    let source_bg = cell_colors(screen, row, col, cell, selection).1;
+    let free = |index: usize| {
+        line.get(index).is_some_and(|&neighbor| {
+            neighbor.ch == ' '
+                && neighbor.width == 1
+                && cell_colors(screen, row, index, neighbor, selection).1 == source_bg
+        })
+    };
+    let spill = (cell_width / 6).max(1);
+    (
+        if col > 0 && free(col - 1) { spill } else { 0 },
+        if col + 1 < screen.cols && free(col + 1) { spill } else { 0 },
+    )
+}
+
+/// Nerd Font icons should appear centered next to text even when their font
+/// baseline or glyph bearings differ dramatically from the primary font.
+/// Keep their aspect ratio and allow a modest scale-up, within safe padding.
+fn place_icon(
+    ink: InkBounds,
+    x: usize,
+    y: usize,
+    cell_width: usize,
+    cell_height: usize,
+    spill: (usize, usize),
+) -> Placement {
+    let available_width = cell_width + spill.0 + spill.1;
+    let available_height = ((cell_height as f32 * 0.84).round() as usize)
+        .clamp(1, cell_height);
+    let ratio = (available_width as f64 / ink.width as f64)
+        .min(available_height as f64 / ink.height as f64)
+        .min(1.6);
+    let width = ((ink.width as f64 * ratio).round() as usize).clamp(1, available_width);
+    let height = ((ink.height as f64 * ratio).round() as usize).clamp(1, available_height);
+    let left_limit = x.saturating_sub(spill.0);
+    let right_limit = x.saturating_add(cell_width).saturating_add(spill.1);
+    let ideal_x = x as i64 + (cell_width as i64 - width as i64) / 2;
+    let actual_x = ideal_x.clamp(left_limit as i64, right_limit.saturating_sub(width) as i64);
+    Placement {
+        x: actual_x as usize,
+        y: y + (cell_height - height) / 2,
+        width,
+        height,
+    }
+}
+
+fn sample_glyph_rect(
+    glyph: &Glyph,
+    ink: InkBounds,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> u8 {
+    let sx = ((x as f32 + 0.5) * ink.width as f32 / width as f32 - 0.5)
+        .clamp(0.0, (ink.width - 1) as f32) + ink.x as f32;
+    let sy = ((y as f32 + 0.5) * ink.height as f32 / height as f32 - 0.5)
+        .clamp(0.0, (ink.height - 1) as f32) + ink.y as f32;
+    let x0 = sx.floor() as usize;
+    let y0 = sy.floor() as usize;
+    let x1 = (x0 + 1).min(ink.x + ink.width - 1);
+    let y1 = (y0 + 1).min(ink.y + ink.height - 1);
+    let tx = sx - x0 as f32;
+    let ty = sy - y0 as f32;
+    let stride = glyph.metrics.width;
+    let row0 = glyph.bitmap[y0 * stride + x0] as f32 * (1.0 - tx)
+        + glyph.bitmap[y0 * stride + x1] as f32 * tx;
+    let row1 = glyph.bitmap[y1 * stride + x0] as f32 * (1.0 - tx)
+        + glyph.bitmap[y1 * stride + x1] as f32 * tx;
+    (row0 * (1.0 - ty) + row1 * ty).round() as u8
 }
 
 fn is_powerline_separator(ch: char) -> bool {
@@ -578,6 +727,48 @@ mod tests {
         assert_eq!(pixels[0], screen.palette.background);
         assert_eq!(pixels[2 * width + 2], 0x111111);
         assert_eq!(pixels[15 * width + 15], screen.palette.background);
+    }
+
+    #[test]
+    fn nerd_icons_exclude_powerline_and_regular_text() {
+        assert!(is_nerd_icon('\u{f10fe}')); // Nerd Font Kubernetes icon
+        assert!(is_nerd_icon('\u{f013}'));
+        assert!(!is_nerd_icon('A'));
+        assert!(!is_nerd_icon('\u{e0b0}'));
+    }
+
+    #[test]
+    fn ink_bounds_ignore_transparent_bearings() {
+        let mut metrics = Metrics::default();
+        metrics.width = 5;
+        metrics.height = 4;
+        let mut bitmap = vec![0; 20];
+        bitmap[1 * 5 + 2] = 255;
+        bitmap[2 * 5 + 3] = 255;
+        let glyph = Glyph { metrics, bitmap };
+        assert_eq!(visible_ink_bounds(&glyph), Some(InkBounds {
+            x: 2, y: 1, width: 2, height: 2,
+        }));
+    }
+
+    #[test]
+    fn icons_are_centered_independently_of_font_baseline() {
+        let bounds = InkBounds { x: 2, y: 4, width: 12, height: 12 };
+        let at = place_icon(bounds, 50, 100, 20, 30, (3, 3));
+        assert_eq!(at.width, 19); // bounded to 1.6x source ink
+        assert_eq!(at.height, 19);
+        assert_eq!(at.y, 105);
+        assert!(at.x >= 47 && at.x + at.width <= 73);
+    }
+
+    #[test]
+    fn nerd_icon_does_not_overlap_adjacent_text() {
+        let mut screen = test_screen();
+        screen.grid[0][0].ch = '\u{f10fe}';
+        screen.grid[0][1].ch = 'X';
+        assert_eq!(icon_spill(&screen, 0, 0, screen.grid[0][0], None, 18), (0, 0));
+        screen.grid[0][1].ch = ' ';
+        assert_eq!(icon_spill(&screen, 0, 0, screen.grid[0][0], None, 18), (0, 3));
     }
 
     #[test]
