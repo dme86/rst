@@ -439,6 +439,9 @@ impl Screen {
             // TODO: merge combining marks into grapheme clusters.
             return;
         }
+        // A one-column terminal cannot hold a double-width glyph. Using a
+        // single-cell replacement prevents the cursor leaving the grid.
+        let (ch, width) = if width > self.cols { ('?', 1) } else { (ch, width) };
         // DECAWM wraps on the next printable glyph, not immediately after
         // painting the last column (the delayed-wrap behavior from st).
         if self.wrap_pending {
