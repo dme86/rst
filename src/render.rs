@@ -656,7 +656,12 @@ impl Renderer {
                               "No URLs found in recent command output.",
                               screen.palette.foreground, cols, screen);
         } else {
-            let first = picker.scroll.min(picker.urls.len().saturating_sub(visible));
+            // A window resize may change the number of visible rows.
+            // Re-clamp the viewport without mutating the picker state.
+            let first = picker.scroll
+                .max(picker.selected.saturating_add(1).saturating_sub(visible))
+                .min(picker.selected)
+                .min(picker.urls.len().saturating_sub(visible));
             for (line, index) in (first..picker.urls.len().min(first + visible)).enumerate() {
                 let y = top.saturating_add((line + 2) * self.cell_height);
                 if y >= top.saturating_add(panel_h.saturating_sub(self.cell_height * 2)) {
