@@ -1,6 +1,7 @@
 mod attention;
 mod charset;
 mod command_capture;
+mod copy_feedback;
 mod config;
 mod help;
 mod ime;
@@ -32,6 +33,7 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use crate::{
     attention::{BellLimiter, FocusTracker, VISUAL_BELL_DURATION},
     command_capture::CommandCapture,
+    copy_feedback::CopyNotice,
     config::Config,
     keyboard::{encode_key, KeyboardModes},
     ime::ImeState,
@@ -65,7 +67,8 @@ struct App {
     bell_flash_until: Option<Instant>,
     help_open: bool,
     help_scroll: usize,
-    toast: Option<(String, Instant)>,
+    toast: Option<CopyNotice>,
+    next_toast_frame: Option<Instant>,
 }
 
 impl App {
@@ -154,17 +157,26 @@ impl App {
                 self.terminal.screen.palette.cursor,
             );
         }
+        if let Some(notice) = &self.toast {
+            if let Some(output_id) = notice.output_id {
+                renderer.draw_output_copy_highlight(
+                    &mut buffer, size.width as usize, size.height as usize,
+                    &self.terminal.screen, output_id, notice.opacity(Instant::now()),
+                );
+            }
+        }
         if self.help_open {
             renderer.draw_help_overlay(
                 &mut buffer, size.width as usize, size.height as usize,
                 &self.terminal.screen, self.help_scroll, cfg!(target_os = "macos"),
             );
         }
-        if let Some((message, until)) = &self.toast {
-            if Instant::now() < *until {
-                renderer.draw_toast(
+        if let Some(notice) = &self.toast {
+            let opacity = notice.opacity(Instant::now());
+            if opacity != 0 {
+                renderer.draw_copy_notice(
                     &mut buffer, size.width as usize, size.height as usize,
-                    &self.terminal.screen, message,
+                    &self.terminal.screen, notice, opacity,
                 );
             }
         }
@@ -283,11 +295,16 @@ impl App {
         self.resize_terminal();
     }
 
-    fn notify(&mut self, message: impl Into<String>) {
-        self.toast = Some((message.into(), Instant::now() + Duration::from_secs(3)));
+    fn present_notice(&mut self, notice: CopyNotice) {
+        self.next_toast_frame = notice.next_wakeup(Instant::now());
+        self.toast = Some(notice);
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    fn notify(&mut self, message: impl Into<String>) {
+        self.present_notice(CopyNotice::warning(message, Instant::now()));
     }
 
     fn copy_last_output(&mut self) {
@@ -295,8 +312,8 @@ impl App {
             self.notify("Clipboard access is disabled in config.toml");
             return;
         }
-        let text = match self.terminal.screen.command_capture.latest_output() {
-            Ok(text) => text,
+        let (text, output_id) = match self.terminal.screen.command_capture.latest_output_with_id() {
+            Ok(pair) => pair,
             Err(err) => {
                 self.notify(err.message());
                 return;
@@ -304,7 +321,9 @@ impl App {
         };
         let length = text.len();
         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
-            Ok(()) => self.notify(format!("Copied command output ({} bytes)", length)),
+            Ok(()) => self.present_notice(CopyNotice::success(
+                length, output_id, Instant::now(),
+            )),
             Err(err) => {
                 eprintln!("rst: command output clipboard: {err}");
                 self.notify("Clipboard unavailable: could not copy command output");
@@ -591,14 +610,27 @@ impl ApplicationHandler<UserEvent> for App {
                 next_deadline = Some(next_deadline.map_or(until, |other| other.min(until)));
             }
         }
-        if let Some((_, until)) = &self.toast {
-            if now >= *until {
+        if let Some(notice) = &self.toast {
+            if notice.finished(now) {
                 self.toast = None;
+                self.next_toast_frame = None;
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             } else {
-                next_deadline = Some(next_deadline.map_or(*until, |old| old.min(*until)));
+                let wakeup = self.next_toast_frame
+                    .or_else(|| notice.next_wakeup(now));
+                if let Some(at) = wakeup {
+                    if now >= at {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        self.next_toast_frame = notice.next_wakeup(now);
+                    }
+                    if let Some(next) = self.next_toast_frame {
+                        next_deadline = Some(next_deadline.map_or(next, |old| old.min(next)));
+                    }
+                }
             }
         }
         // No busy redraw when neither blinking nor a bell flash is active.
@@ -1019,6 +1051,7 @@ fn main() -> Result<()> {
         help_open: false,
         help_scroll: 0,
         toast: None,
+        next_toast_frame: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

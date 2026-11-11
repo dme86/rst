@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     config::FontConfig,
+    copy_feedback::{CopyNotice, NoticeKind},
     ime::{self, Preedit},
     help,
     shaping::{self, FontBytes, ShapedText},
@@ -602,28 +603,120 @@ impl Renderer {
         self.draw_ui_text(pixels, width, height, text_x, bottom, footer, border, cols, screen);
     }
 
-    /// A brief confirmation/error message after a copy shortcut.
-    pub fn draw_toast(
+    /// Briefly tint ONLY screen cells belonging to the OSC 133 command
+    /// whose text was successfully copied. The effect is composited over
+    /// pixels, leaving cell colors, cursor, scrollback and selection intact.
+    pub fn draw_output_copy_highlight(
+        &self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        screen: &Screen,
+        output_id: u32,
+        opacity: u8,
+    ) {
+        if output_id == 0 || opacity == 0 || self.cell_width == 0
+            || self.cell_height == 0 || width == 0 || height == 0
+        {
+            return;
+        }
+        let accent = screen.palette.ansi[2]; // current theme's green
+        let wash_alpha = (opacity as u16 * 66 / 255) as u8;
+        let edge_alpha = (opacity as u16 * 200 / 255) as u8;
+        for row in 0..screen.rows {
+            let top = self.padding.saturating_add(row.saturating_mul(self.cell_height));
+            if top >= height { break; }
+            let cells = screen.display_row(row);
+            let mut col = 0usize;
+            while col < cells.len() {
+                if cells[col].output_id != output_id {
+                    col += 1;
+                    continue;
+                }
+                let first = col;
+                while col < cells.len() && cells[col].output_id == output_id {
+                    col += 1;
+                }
+                let x = self.padding.saturating_add(first.saturating_mul(self.cell_width));
+                let segment_w = (col - first).saturating_mul(self.cell_width);
+                blend_rect(
+                    pixels, width, height, x, top,
+                    segment_w, self.cell_height, accent, wash_alpha,
+                );
+                // A soft accent at the left of each contiguous output run
+                // keeps the selection readable without replacing glyph ink.
+                blend_rect(
+                    pixels, width, height, x, top,
+                    2.min(segment_w), self.cell_height, accent, edge_alpha,
+                );
+            }
+        }
+    }
+
+    /// Compact native clipboard confirmation with a soft visual hierarchy.
+    /// Both the card and the actual copied output share the same fade clock.
+    pub fn draw_copy_notice(
         &mut self,
         pixels: &mut [u32],
         width: usize,
         height: usize,
         screen: &Screen,
-        message: &str,
+        notice: &CopyNotice,
+        opacity: u8,
     ) {
-        if width == 0 || height == 0 || self.cell_width == 0 || self.cell_height == 0 {
+        if opacity == 0 || width == 0 || height == 0
+            || self.cell_width == 0 || self.cell_height == 0
+        {
             return;
         }
-        let cols = message.chars().count().min(screen.cols.saturating_sub(2)).max(1);
-        let panel_w = (cols + 2).saturating_mul(self.cell_width).min(width);
-        let panel_h = (self.cell_height + 6).min(height);
+
+        let accent = match notice.kind {
+            NoticeKind::Copied => screen.palette.ansi[2],
+            NoticeKind::Warning => screen.palette.ansi[3],
+        };
+        let max_cols = screen.cols.saturating_sub(5).clamp(1, 54);
+        let panel_w = (max_cols + 4).saturating_mul(self.cell_width).min(width);
+        let panel_h = (self.cell_height.saturating_mul(2) + 22).min(height);
         let left = width.saturating_sub(panel_w) / 2;
-        let top = height.saturating_sub(panel_h + self.cell_height);
-        rect(pixels, width, height, left, top, panel_w, panel_h, screen.palette.selection);
+        let top = height.saturating_sub(panel_h.saturating_add(self.cell_height * 2));
+        let panel_opacity = (opacity as u16 * 236 / 255) as u8;
+
+        // A tiny offset shadow and 5-pixel stepped corners suggest a soft
+        // floating card without an OS toolkit or changes to terminal data.
+        blend_rect(
+            pixels, width, height,
+            left.saturating_add(3), top.saturating_add(4),
+            panel_w, panel_h, 0x000000,
+            (opacity as u16 * 65 / 255) as u8,
+        );
+        let body = screen.palette.background;
+        if panel_h > 8 && panel_w > 10 {
+            blend_rect(pixels, width, height, left + 5, top, panel_w - 10, panel_h, body, panel_opacity);
+            blend_rect(pixels, width, height, left + 2, top + 2, panel_w - 4, panel_h - 4, body, panel_opacity);
+        }
+        blend_rect(pixels, width, height, left, top + 5.min(panel_h),
+                   panel_w, panel_h.saturating_sub(10), body, panel_opacity);
+        blend_rect(pixels, width, height, left, top + 5.min(panel_h),
+                   3.min(panel_w), panel_h.saturating_sub(10), accent,
+                   (opacity as u16 * 216 / 255) as u8);
+
+        let text_x = left.saturating_add(self.cell_width.saturating_mul(2));
+        let text_y = top.saturating_add(7);
+        let icon = match notice.kind {
+            NoticeKind::Copied => "✓",
+            NoticeKind::Warning => "!",
+        };
+        let header = format!("{icon}  {}", notice.title);
+        let title_ink = blend(accent, body, opacity);
+        let sub_ink = blend(screen.palette.foreground, body, opacity);
+        self.draw_ui_text(
+            pixels, width, height, text_x, text_y,
+            &header, title_ink, max_cols, screen,
+        );
         self.draw_ui_text(
             pixels, width, height,
-            left.saturating_add(self.cell_width), top + 3,
-            message, screen.palette.foreground, cols, screen,
+            text_x, text_y.saturating_add(self.cell_height + 2),
+            &notice.detail, sub_ink, max_cols, screen,
         );
     }
 
@@ -1380,6 +1473,33 @@ fn rect(
     }
 }
 
+/// Alpha composite a rectangle over the existing frame, preserving the
+/// rendered glyph pixels underneath instead of overwriting the terminal.
+#[allow(clippy::too_many_arguments)]
+fn blend_rect(
+    pixels: &mut [u32],
+    stride: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+    alpha: u8,
+) {
+    if alpha == 0 || stride == 0 { return; }
+    let valid_height = height.min(pixels.len() / stride);
+    let x_end = x.saturating_add(w).min(stride);
+    if x >= x_end { return; }
+    for row in y..y.saturating_add(h).min(valid_height) {
+        let start = row * stride + x;
+        let end = row * stride + x_end;
+        for pixel in &mut pixels[start..end] {
+            *pixel = blend(color, *pixel, alpha);
+        }
+    }
+}
+
 /// Subtle, short visual BEL indicator. Draw *after* the terminal glyphs;
 /// no reflow, font changes, or fullscreen inversion. This is also a usable
 /// fallback on Wayland systems without an installed libcanberra sound player.
@@ -2076,11 +2196,104 @@ mod tests {
         let height = term.screen.rows * renderer.cell_height;
         let mut pixels = vec![0u32; width * height];
         renderer.draw_help_overlay(&mut pixels, width, height, &term.screen, 200, false);
-        renderer.draw_toast(
-            &mut pixels, width, height, &term.screen,
+        let notice = crate::copy_feedback::CopyNotice::warning(
             "No command markers: run rst --install-shell-integration",
+            std::time::Instant::now(),
+        );
+        renderer.draw_copy_notice(
+            &mut pixels, width, height, &term.screen, &notice, 255,
         );
         assert!(pixels.iter().any(|&px| px != 0));
+    }
+
+
+    #[test]
+    fn copy_fade_tints_only_cells_tagged_as_the_last_command_output() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(32, 4, 2, palette);
+        term.advance(b"prompt> \x1b]133;C\x07hello\x1b]133;D\x07");
+        term.screen.show_cursor = false;
+        let (_, id) = term.screen.command_capture.latest_output_with_id().unwrap();
+
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut before = vec![0u32; width * height];
+        renderer.draw(&mut before, width, height, &term.screen, None, None);
+
+        let mut clear = before.clone();
+        renderer.draw_output_copy_highlight(
+            &mut clear, width, height, &term.screen, id, 0,
+        );
+        assert_eq!(clear, before);
+
+        let mut highlighted = before.clone();
+        renderer.draw_output_copy_highlight(
+            &mut highlighted, width, height, &term.screen, id, 255,
+        );
+        let y_start = renderer.padding;
+        let x_prompt_end = renderer.padding + 8 * renderer.cell_width;
+        let x_output_end = renderer.padding + 13 * renderer.cell_width;
+        for y in y_start..y_start + renderer.cell_height {
+            let row = y * width;
+            assert_eq!(
+                &highlighted[row + renderer.padding..row + x_prompt_end],
+                &before[row + renderer.padding..row + x_prompt_end],
+                "Prompt pixels must not be highlighted",
+            );
+        }
+        let mut output_changed = false;
+        for y in y_start..y_start + renderer.cell_height {
+            let row = y * width;
+            if highlighted[row + x_prompt_end..row + x_output_end]
+                != before[row + x_prompt_end..row + x_output_end]
+            {
+                output_changed = true;
+                break;
+            }
+        }
+        assert!(output_changed, "Copied output must visibly highlight");
+        assert_eq!(term.screen.grid[0][8].ch, 'h');
+        assert_eq!(term.screen.grid[0][0].ch, 'p');
+    }
+
+    #[test]
+    fn copy_card_uses_fade_clock_and_does_not_modify_terminal_data() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(48, 8, 0, palette);
+        term.advance(b"original text");
+        term.screen.show_cursor = false;
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut before = vec![0u32; width * height];
+        renderer.draw(&mut before, width, height, &term.screen, None, None);
+        let notice = crate::copy_feedback::CopyNotice::success(3 * 1024, 1, std::time::Instant::now());
+        let mut pixels = before.clone();
+        renderer.draw_copy_notice(&mut pixels, width, height, &term.screen, &notice, 0);
+        assert_eq!(pixels, before);
+        renderer.draw_copy_notice(&mut pixels, width, height, &term.screen, &notice, 255);
+        assert_ne!(pixels, before);
+        assert_eq!(term.screen.grid[0][0].ch, 'o');
+        assert_eq!(term.screen.history.len(), 0);
+    }
+
+    #[test]
+    fn blended_rectangle_clips_to_surface_and_preserves_other_pixels() {
+        let mut pixels = vec![0x101010; 8 * 6];
+        blend_rect(&mut pixels, 8, 6, 2, 1, 3, 2, 0x00ff00, 255);
+        assert_eq!(pixels[0], 0x101010);
+        assert_eq!(pixels[1 * 8 + 2], 0x00ff00);
+        assert_eq!(pixels[2 * 8 + 4], 0x00ff00);
+        assert_eq!(pixels[3 * 8 + 3], 0x101010);
+        blend_rect(&mut pixels, 8, 6, 100, 100, 30, 30, 0xff0000, 255);
+        assert_eq!(pixels[0], 0x101010);
+        blend_rect(&mut pixels, 8, 6, 0, 0, 8, 6, 0xffffff, 0);
+        assert_eq!(pixels[0], 0x101010);
     }
 
 }

@@ -27,6 +27,7 @@ impl CopyError {
 
 #[derive(Clone, Debug)]
 struct OutputBuffer {
+    id: u32,
     previous_lines: String,
     line: Vec<char>,
     column: usize,
@@ -35,8 +36,9 @@ struct OutputBuffer {
 }
 
 impl OutputBuffer {
-    fn new(max_bytes: usize) -> Self {
+    fn new(max_bytes: usize, id: u32) -> Self {
         Self {
+            id,
             previous_lines: String::new(),
             line: Vec::new(),
             column: 0,
@@ -148,6 +150,7 @@ pub struct CommandCapture {
     completed: Option<OutputBuffer>,
     max_bytes: usize,
     saw_markers: bool,
+    next_id: u32,
 }
 
 impl Default for CommandCapture {
@@ -163,6 +166,7 @@ impl CommandCapture {
             completed: None,
             max_bytes: max_bytes.max(1),
             saw_markers: false,
+            next_id: 0,
         }
     }
 
@@ -172,6 +176,11 @@ impl CommandCapture {
 
     pub fn running(&self) -> bool {
         self.active.is_some()
+    }
+
+    /// The ID of the command currently emitting PTY output, if any.
+    pub fn active_output_id(&self) -> Option<u32> {
+        self.active.as_ref().map(|output| output.id)
     }
 
     pub fn marker(&mut self, marker: u8) {
@@ -185,7 +194,10 @@ impl CommandCapture {
             b'C' => {
                 self.saw_markers = true;
                 self.finish();
-                self.active = Some(OutputBuffer::new(self.max_bytes));
+                // IDs uniquely tag visible cells, including those moved to
+                // scrollback; zero is reserved for unmarked prompt text.
+                self.next_id = self.next_id.wrapping_add(1).max(1);
+                self.active = Some(OutputBuffer::new(self.max_bytes, self.next_id));
             }
             b'D' => {
                 self.saw_markers = true;
@@ -222,21 +234,27 @@ impl CommandCapture {
     /// Copy an active command if it already produced output, otherwise
     /// prefer the most recent completed command. Never silently truncate.
     pub fn latest_output(&self) -> Result<String, CopyError> {
+        self.latest_output_with_id().map(|(text, _)| text)
+    }
+
+    /// Return exactly the output chosen for copying plus its visible-cell
+    /// identifier. An empty running command falls back to the last complete
+    /// command, matching the existing copy shortcut's semantics.
+    pub fn latest_output_with_id(&self) -> Result<(String, u32), CopyError> {
         if !self.saw_markers {
             return Err(CopyError::NoIntegration);
         }
         if let Some(active) = &self.active {
             match active.content() {
-                Ok(text) => return Ok(text),
+                Ok(text) => return Ok((text, active.id)),
                 Err(CopyError::TooLarge) => return Err(CopyError::TooLarge),
                 Err(_) => {}
             }
         }
-        self.completed
-            .as_ref()
-            .ok_or(CopyError::NoOutput)?
-            .content()
+        let completed = self.completed.as_ref().ok_or(CopyError::NoOutput)?;
+        completed.content().map(|text| (text, completed.id))
     }
+
 }
 
 #[cfg(test)]
@@ -331,4 +349,24 @@ mod tests {
         cap.marker(b'D');
         assert_eq!(cap.latest_output(), Err(CopyError::NoOutput));
     }
+
+    #[test]
+    fn output_ids_follow_active_and_completed_capture() {
+        let mut cap = CommandCapture::default();
+        assert_eq!(cap.active_output_id(), None);
+        cap.marker(b'C');
+        let first = cap.active_output_id().unwrap();
+        assert_ne!(first, 0);
+        cap.print('a');
+        cap.marker(b'D');
+        assert_eq!(cap.active_output_id(), None);
+        assert_eq!(cap.latest_output_with_id(), Ok(("a".to_owned(), first)));
+        cap.marker(b'C');
+        assert_eq!(cap.latest_output_with_id(), Ok(("a".to_owned(), first)));
+        let second = cap.active_output_id().unwrap();
+        assert_ne!(second, first);
+        cap.print('b');
+        assert_eq!(cap.latest_output_with_id(), Ok(("b".to_owned(), second)));
+    }
+
 }

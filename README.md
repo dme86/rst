@@ -46,9 +46,14 @@ running command as well as the last completed command.
 
 The help popup is drawn inside rst. It lists clipboard, font, selection,
 scrollback, shell integration and help shortcuts, with scrolling on small
-windows. A short status message confirms success or explains why no output
-is available, and closes automatically. Neither the popup nor the status
-message alters terminal cells or sends text to the PTY.
+windows. On successful copying, only the **visible cells belonging to
+the copied OSC 133 command output** glow briefly in the theme's green, then
+fade away. An unobtrusive floating card confirms the copy, shows the exact
+size (B/KiB/MiB), and fades in/out on the same clock. Prompt text, input,
+older command outputs, and the actual terminal/scrollback buffers are
+untouched. If the command output has scrolled away, the floating card
+still confirms successful copying. Errors show a warm warning-colored card.
+The animation runs only during fade transitions, not a busy redraw loop.
 
 **One-time setup** for bash, zsh and fish:
 

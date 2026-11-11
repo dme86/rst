@@ -218,6 +218,16 @@ vendor or translate upstream C source.
   reported, never silently truncated.
 - Cmd+Shift+O / Ctrl+Shift+O copies to the existing native arboard
   clipboard. It works with output emitted before the scrollback window.
+- Each output block has a unique OSC 133 ID stored with the terminal cells,
+  including scrollback and wide Unicode dummy cells. On successful copying,
+  highlight ONLY visible cells from the copied command; prompt, typed command
+  and previous outputs stay unchanged. Overwrites/erases clear the tag.
+- The success and warning card uses a 180 ms fade-in, quiet hold and soft
+  850 ms fade-out. The text output highlight follows the same fade curve
+  and does not change any terminal colors, selection or PTY bytes.
+  Timer wakeups happen only while fading, not continuously during hold.
+- Tests: src/copy_feedback.rs, src/copy_feedback_tests.rs, src/render.rs,
+  and src/command_capture.rs.
 - Add a modal, scrollable help popup (F1, Cmd/Ctrl+Shift+H; Esc closes)
   and a timed status toast to the existing softbuffer renderer, without
   touching terminal contents or forwarding help keystrokes to the PTY.
