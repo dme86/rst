@@ -395,7 +395,7 @@ impl ApplicationHandler<UserEvent> for App {
         let logical_height = self.config.window.rows as f64 * self.config.font.size as f64 * 1.40
             + 2.0 * self.config.window.padding as f64;
         let attributes = Window::default_attributes()
-            .with_title("rst — Rust Simple Terminal")
+            .with_title(&self.terminal.screen.title)
             .with_inner_size(LogicalSize::new(logical_width, logical_height));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -581,7 +581,24 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Output(bytes) => {
                 let previous_mouse_mode = self.terminal.screen.mouse_tracking;
+                let previous_title = self.terminal.screen.title.clone();
                 self.terminal.advance(&bytes);
+                if self.terminal.screen.title != previous_title {
+                    if let Some(window) = &self.window {
+                        window.set_title(&self.terminal.screen.title);
+                    }
+                }
+                // OSC 52 is opt-in, write-only, and size-limited. Native
+                // clipboard APIs must be accessed on the window/UI thread.
+                for text in self.terminal.screen.take_clipboard_writes() {
+                    if self.config.clipboard.enabled && self.config.clipboard.osc52_write {
+                        if let Err(err) =
+                            arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text))
+                        {
+                            eprintln!("rst: OSC 52 clipboard write: {err}");
+                        }
+                    }
+                }
                 if self.terminal.screen.mouse_tracking != previous_mouse_mode {
                     // Never carry held buttons or stale movement across a
                     // TUI enabling/disabling DEC mouse reporting.
@@ -621,12 +638,13 @@ fn main() -> Result<()> {
         &config.terminal.term,
         event_loop.create_proxy(),
     )?;
-    let terminal = Terminal::new(
+    let mut terminal = Terminal::new(
         config.window.columns,
         config.window.rows,
         config.scrollback.lines,
         palette,
     );
+    terminal.screen.osc52_write_allowed = config.clipboard.enabled && config.clipboard.osc52_write;
     let original_font_size = config.font.size;
     let config_blink_ms = config.cursor.blink_interval_ms;
     let mut app = App {
