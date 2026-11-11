@@ -161,7 +161,7 @@ pub fn layout(
             row = row.saturating_add(1);
         }
         if let Some((start, _)) = range {
-            if caret.is_none() && start <= byte {
+            if caret.is_none() && start < byte + grapheme.len() {
                 caret = Some((col, row.min(rows - 1)));
             }
         }
