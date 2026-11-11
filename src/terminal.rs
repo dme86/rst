@@ -950,8 +950,30 @@ impl Perform for Screen {
         }
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], ignore: bool, action: u8) {
+    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, action: u8) {
         if ignore {
+            return;
+        }
+        if intermediates == b"#" {
+            if action == b'8' {
+                // DECALN: fill the current screen with E, matching st's
+                // screen alignment test, without changing cursor/margins.
+                let (fg, bg) = self.ink_colors();
+                let cell = Cell {
+                    ch: 'E',
+                    width: 1,
+                    fg,
+                    bg,
+                    style: self.style,
+                };
+                for row in &mut self.grid {
+                    row.fill(cell);
+                }
+                self.view_offset = 0;
+            }
+            return;
+        }
+        if !intermediates.is_empty() {
             return;
         }
         match action {
