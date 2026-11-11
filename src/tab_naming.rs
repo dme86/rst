@@ -35,17 +35,12 @@ pub fn cwd_from_osc7(raw: &[u8]) -> Option<String> {
     {
         return None;
     }
-    Some(value.trim_end_matches('/').to_owned().if_empty_root())
-}
-
-trait RootPath {
-    fn if_empty_root(self) -> Self;
-}
-
-impl RootPath for String {
-    fn if_empty_root(self) -> Self {
-        if self.is_empty() { "/".into() } else { self }
-    }
+    let without_trailing_slashes = value.trim_end_matches('/');
+    Some(if without_trailing_slashes.is_empty() {
+        "/".to_owned()
+    } else {
+        without_trailing_slashes.to_owned()
+    })
 }
 
 fn hex_value(ch: u8) -> Option<u8> {
