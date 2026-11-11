@@ -722,6 +722,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
+                if self.help_open { return; }
                 let tracking = self.terminal.screen.mouse_tracking;
                 if tracking.enabled() && !self.modifiers.shift_key() && !self.selecting {
                     let at = self.cell_at_mouse();
@@ -750,6 +751,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
+                if self.help_open { return; }
                 let tracking = self.terminal.screen.mouse_tracking;
                 let at = self.cell_at_mouse();
                 // Once Shift begins a local selection inside a TUI, finish
@@ -818,6 +820,25 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.help_open {
+                    let amount = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
+                        MouseScrollDelta::PixelDelta(pos) => (pos.y / 24.0).round() as i32,
+                    };
+                    let visible = self.terminal.screen.rows.saturating_sub(5).min(23).max(1);
+                    let limit = help::lines(cfg!(target_os = "macos")).len()
+                        .saturating_sub(visible);
+                    if amount > 0 {
+                        self.help_scroll = self.help_scroll.saturating_sub(amount as usize);
+                    } else {
+                        self.help_scroll = self.help_scroll.saturating_add((-amount) as usize)
+                            .min(limit);
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 let tracking = self.terminal.screen.mouse_tracking;
                 if tracking.enabled() && !self.modifiers.shift_key() {
                     let cell_size = self.renderer.as_ref().map_or(
