@@ -712,6 +712,35 @@ impl Renderer {
         }
     }
 
+    /// Collapsed panes stay alive; this is a small native sidebar, not a
+    /// miniature terminal render or another animation timer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_collapsed_panes(
+        &mut self, pixels: &mut [u32], width: usize, height: usize, screen: &Screen,
+        rail: crate::panes::Rect, items: &[(crate::panes::Rect, String, bool)], config: &TabsConfig,
+    ) {
+        let color = |text: &str| tabs::parse_color(text).unwrap_or(0x282828);
+        rect(pixels, width, height, rail.x, rail.y, rail.width, rail.height, color(&config.colors.background));
+        rect(pixels, width, height, rail.x, rail.y, 1.min(rail.width), rail.height, color(&config.colors.accent));
+        for (index, (area, title, unread)) in items.iter().enumerate() {
+            if area.width < 2 || area.height < 2 { continue; }
+            let (background, ink) = if index == 0 {
+                (color(&config.colors.active_background), color(&config.colors.active_foreground))
+            } else { (color(&config.colors.inactive_background), color(&config.colors.foreground)) };
+            rect(pixels, width, height, area.x + 2, area.y + 1,
+                area.width.saturating_sub(3), area.height.saturating_sub(2), background);
+            if *unread { rect(pixels, width, height, area.x + 2, area.y + 1,
+                3.min(area.width.saturating_sub(3)), area.height.saturating_sub(2), color(&config.colors.unread)); }
+            if area.height >= self.cell_height && self.cell_width != 0 {
+                let padding = self.padding.min(area.width / 4);
+                let columns = area.width.saturating_sub(padding * 2) / self.cell_width;
+                self.draw_ui_text(pixels, width, height.min(area.y + area.height),
+                    area.x + padding, area.y + (area.height - self.cell_height) / 2,
+                    title, ink, columns, screen);
+            }
+        }
+    }
+
     /// Draw a native-looking, keyboard-driven help panel over the terminal.
     /// The terminal grid remains untouched and text does not enter the PTY.
     pub fn draw_help_overlay(

@@ -262,3 +262,19 @@ number alone is not evidence of a terminal rendering regression. An additional
 fixture-ready timestamp diagnostic measured readiness at 240–351 ms after spawn
 and prompt-frame submission at 276–364 ms, with the same 11.2 MiB/s throughput.
 These are local diagnostic samples rather than cross-platform guarantees.
+
+## Full pane view
+
+Cmd+Shift+F (Wayland: Ctrl+Shift+F) toggles a per-tab enlarged pane and collapsed
+sidebar without changing the split tree. Layout tests verify exact restoration,
+normal PTY geometry for collapsed siblings, independent tabs, tiny windows,
+closing panes, creating new splits and exact shortcut modifiers. Collapsed panes
+use hidden-output handling: their output updates unread/title metadata, but does
+not trigger a terminal redraw for every chunk.
+
+Native macOS checks covered nested splits → full pane view → original splits,
+clicking a collapsed pane, the Restore button, state across tab switches, actual
+enlarged PTY dimensions, and closing the enlarged pane down to a single remaining
+pane. The sidebar's press/release gesture is consumed locally even when Restore
+removes the sidebar before mouse release. Existing selections/drag reports may
+still finish at the edge of the active pane.

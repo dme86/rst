@@ -34,6 +34,8 @@ pub fn lines(macos: bool) -> Vec<String> {
         format!("  Split left / right             {}", if macos { "Cmd+D" } else { "Ctrl+Shift+D" }),
         format!("  Split top / bottom             {}", if macos { "Cmd+Shift+D" } else { "Ctrl+Shift+E" }),
         format!("  Focus neighboring pane         {}", if macos { "Cmd+Alt+Arrow" } else { "Ctrl+Shift+Arrow" }),
+        format!("  Full pane / restore layout     {}", if macos { "Cmd+Shift+F" } else { "Ctrl+Shift+F" }),
+        "  Collapsed sidebar              Click a pane / Restore".into(),
         format!("  Close focused pane             {close_tab}"),
         "  Click inside a pane to focus it; tab × closes all panes".into(),
         "".into(),

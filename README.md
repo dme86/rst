@@ -113,8 +113,23 @@ OSC 7 metadata provides an existing local directory.
 | Split left/right (vertical divider) | **Cmd+D** | **Ctrl+Shift+D** |
 | Split top/bottom (horizontal divider) | **Cmd+Shift+D** | **Ctrl+Shift+E** |
 | Focus a neighboring pane | **Cmd+Option+Arrow** | **Ctrl+Shift+Arrow** |
+| Expand focused pane / restore splits | **Cmd+Shift+F** | **Ctrl+Shift+F** |
 | Close the focused pane | **Cmd+W** | **Ctrl+Shift+W** |
 | Focus with the mouse | **Click inside the pane** | Same |
+
+**Full pane view:** Press the F shortcut to expand the focused pane into the
+terminal area, with the others collapsed into a narrow sidebar on the right.
+Press the same shortcut again, or click **Restore**, to return to the exact
+split tree. The OS window itself does not enter fullscreen. Click a collapsed
+pane (or use the directional focus shortcuts) to bring it forward while staying
+in full pane view. This mode is remembered separately for each tab.
+
+Collapsed shells keep running at their ordinary split grid sizes; only the
+expanded pane receives the enlarged PTY size. Output in collapsed panes marks
+its sidebar entry as unread without repeatedly rendering the hidden terminal.
+Closing a pane updates the sidebar; when only one remains, the sidebar goes away.
+Creating a new split returns to the normal split layout. Full pane view uses the
+same terminal resizing behavior described below.
 
 The focused pane has a thin accent-colored outline and receives keyboard,
 clipboard, IME and mouse input. Scroll the focused pane with the wheel or the

@@ -52,18 +52,102 @@ pub enum Node {
 pub struct Layout {
     pub root: Node,
     pub focused: u64,
+    pub zoomed: bool,
 }
 impl Layout {
     pub fn new(id: u64) -> Self {
         Self {
             root: Node::Leaf(id),
             focused: id,
+            zoomed: false,
         }
     }
     pub fn panes(&self, rect: Rect) -> Vec<(u64, Rect)> {
         let mut panes = Vec::new();
         self.root.place(rect, &mut panes);
         panes
+    }
+    pub fn toggle_zoom(&mut self) -> bool {
+        if self.ids().len() < 2 {
+            return false;
+        }
+        self.zoomed = !self.zoomed;
+        true
+    }
+    pub fn rail_rect(&self, rect: Rect, rail_width: usize) -> Option<Rect> {
+        if !self.zoomed || self.ids().len() < 2 {
+            return None;
+        }
+        let width = rail_width.min(rect.width / 3);
+        if width == 0 {
+            return None;
+        }
+        Some(Rect {
+            x: rect.x + rect.width - width,
+            width,
+            ..rect
+        })
+    }
+    pub fn visible_panes(&self, rect: Rect, rail_width: usize) -> Vec<(u64, Rect)> {
+        if !self.zoomed {
+            return self.panes(rect);
+        }
+        let focus = if let Some(rail) = self.rail_rect(rect, rail_width) {
+            let gap = DIVIDER.min(rect.width.saturating_sub(rail.width + 1));
+            Rect {
+                width: rect.width - rail.width - gap,
+                ..rect
+            }
+        } else {
+            rect
+        };
+        vec![(self.focused, focus)]
+    }
+    /// Collapsed PTYs keep their normal geometry; they are never resized
+    /// into the tiny sidebar. Only the enlarged pane changes grid size.
+    pub fn resize_panes(&self, rect: Rect, rail_width: usize) -> Vec<(u64, Rect)> {
+        let mut panes = self.panes(rect);
+        if self.zoomed {
+            let expanded = self.visible_panes(rect, rail_width)[0].1;
+            for (id, pane) in &mut panes {
+                if *id == self.focused {
+                    *pane = expanded;
+                }
+            }
+        }
+        panes
+    }
+    /// None is the restore button; remaining entries select a collapsed pane.
+    pub fn rail_entries(
+        &self,
+        rect: Rect,
+        rail_width: usize,
+        row_height: usize,
+    ) -> Vec<(Option<u64>, Rect)> {
+        let Some(rail) = self.rail_rect(rect, rail_width) else {
+            return Vec::new();
+        };
+        let mut ids = vec![None];
+        ids.extend(
+            self.ids()
+                .into_iter()
+                .filter(|id| *id != self.focused)
+                .map(Some),
+        );
+        let height = row_height.min(rail.height / ids.len());
+        ids.into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                (
+                    id,
+                    Rect {
+                        y: rail.y + index * height,
+                        height,
+                        ..rail
+                    },
+                )
+            })
+            .collect()
     }
     pub fn ids(&self) -> Vec<u64> {
         self.panes(Rect::default())
@@ -80,6 +164,7 @@ impl Layout {
         }
         if self.root.split(id, new_id, axis) {
             self.focused = new_id;
+            self.zoomed = false;
             true
         } else {
             false
@@ -91,6 +176,9 @@ impl Layout {
             return false;
         }
         self.root.remove(id);
+        if ids.len() == 2 {
+            self.zoomed = false;
+        }
         if self.focused == id {
             let at = ids.iter().position(|item| *item == id).unwrap();
             self.focused = if at + 1 < ids.len() {
@@ -283,6 +371,7 @@ pub enum Action {
     Split(Axis),
     Focus(Direction),
     Close,
+    ToggleZoom,
 }
 
 pub fn shortcut(
@@ -291,6 +380,14 @@ pub fn shortcut(
     macos: bool,
 ) -> Option<Action> {
     use winit::keyboard::{Key, ModifiersState as M, NamedKey};
+    let zoom = if macos {
+        M::SUPER | M::SHIFT
+    } else {
+        M::CONTROL | M::SHIFT
+    };
+    if mods == zoom && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("f")) {
+        return Some(Action::ToggleZoom);
+    }
     let primary = if macos {
         M::SUPER
     } else {
@@ -547,5 +644,104 @@ mod frame_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+    use winit::keyboard::{Key, ModifiersState as M};
+    fn layout() -> Layout {
+        let mut layout = Layout::new(1);
+        layout.split(1, 2, Axis::Vertical);
+        layout.split(2, 3, Axis::Horizontal);
+        layout
+    }
+    #[test]
+    fn zoom_preserves_tree_and_collapsed_pty_sizes_and_restores_exact_layout() {
+        let mut layout = layout();
+        let rect = Rect {
+            x: 5,
+            y: 32,
+            width: 1000,
+            height: 600,
+        };
+        let original = layout.panes(rect);
+        assert!(layout.toggle_zoom());
+        assert_eq!(layout.visible_panes(rect, 160).len(), 1);
+        let expanded = layout.visible_panes(rect, 160)[0];
+        assert_eq!(expanded.0, 3);
+        assert!(expanded.1.width > original[2].1.width);
+        let resized = layout.resize_panes(rect, 160);
+        assert_eq!(resized[0], original[0]);
+        assert_eq!(resized[1], original[1]);
+        assert_eq!(resized[2], expanded);
+        assert_eq!(layout.ids(), vec![1, 2, 3]);
+        layout.focused = 1;
+        assert_eq!(layout.visible_panes(rect, 160)[0].0, 1);
+        assert!(layout.toggle_zoom());
+        assert_eq!(layout.visible_panes(rect, 160), original);
+        assert_eq!(layout.resize_panes(rect, 160), original);
+        assert!(layout.rail_entries(rect, 160, 32).is_empty());
+    }
+    #[test]
+    fn sidebar_and_zoomed_pane_stay_in_bounds_when_window_is_tiny() {
+        let mut layout = layout();
+        layout.toggle_zoom();
+        for width in 0..60 {
+            for height in 0..60 {
+                let rect = Rect {
+                    x: 7,
+                    y: 15,
+                    width,
+                    height,
+                };
+                let focused = layout.visible_panes(rect, 200)[0].1;
+                assert!(focused.x + focused.width <= rect.x + width);
+                assert!(focused.y + focused.height <= rect.y + height);
+                if width > 0 {
+                    assert!(focused.width > 0);
+                }
+                for (_, entry) in layout.rail_entries(rect, 200, 40) {
+                    assert!(entry.x + entry.width <= rect.x + width);
+                    assert!(entry.y + entry.height <= rect.y + height);
+                    assert!(!focused.contains(entry.x, entry.y));
+                }
+            }
+        }
+    }
+    #[test]
+    fn zoom_handles_session_exit_new_splits_and_independent_tabs() {
+        let mut first = layout();
+        let second = layout();
+        first.toggle_zoom();
+        assert!(!second.zoomed);
+        first.remove(3);
+        assert!(first.zoomed && first.contains(first.focused));
+        first.remove(2);
+        assert!(!first.zoomed);
+        assert!(!first.toggle_zoom());
+        first.split(1, 4, Axis::Vertical);
+        first.toggle_zoom();
+        first.split(4, 5, Axis::Horizontal);
+        assert!(!first.zoomed);
+        assert_eq!(first.ids(), vec![1, 4, 5]);
+    }
+    #[test]
+    fn zoom_uses_f_without_capturing_find_or_native_fullscreen() {
+        assert_eq!(
+            shortcut(&Key::Character("F"), M::SUPER | M::SHIFT, true),
+            Some(Action::ToggleZoom)
+        );
+        assert_eq!(
+            shortcut(&Key::Character("f"), M::CONTROL | M::SHIFT, false),
+            Some(Action::ToggleZoom)
+        );
+        assert_eq!(shortcut(&Key::Character("f"), M::SUPER, true), None);
+        assert_eq!(
+            shortcut(&Key::Character("f"), M::SUPER | M::CONTROL, true),
+            None
+        );
+        assert_eq!(shortcut(&Key::Character("f"), M::empty(), false), None);
     }
 }

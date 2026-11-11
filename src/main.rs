@@ -92,6 +92,7 @@ struct App {
     selection: Option<Selection>,
     clicks: ClickTracker,
     selecting: bool,
+    rail_mouse_grab: bool,
     next_cursor_blink: Instant,
     next_text_blink: Instant,
     next_process_probe: Instant,
@@ -160,7 +161,29 @@ impl App {
     }
 
     fn visible_panes(&self) -> Vec<(u64, panes::Rect)> {
-        self.layouts[&self.current_tab()].panes(self.content_rect())
+        self.layouts[&self.current_tab()].visible_panes(self.content_rect(), self.pane_rail_width())
+    }
+
+    fn pane_rail_width(&self) -> usize {
+        self.renderer.as_ref().map_or(0, |renderer| renderer.cell_width * 14 + renderer.padding * 2)
+    }
+
+    fn pane_rail_entries(&self) -> Vec<(Option<u64>, panes::Rect)> {
+        let row_height = self.renderer.as_ref().map_or(0, |renderer| renderer.cell_height + 12);
+        self.layouts[&self.current_tab()].rail_entries(self.content_rect(), self.pane_rail_width(), row_height)
+    }
+
+    fn toggle_pane_zoom(&mut self) {
+        let owner = self.current_tab();
+        if self.layouts.get_mut(&owner).expect("current tab").toggle_zoom() {
+            if !self.layouts[&owner].zoomed {
+                for session in &mut self.inactive_sessions {
+                    if self.layouts[&owner].contains(session.id) { session.unread = false; }
+                }
+            }
+            self.clear_tab_interaction();
+            self.resize_terminal();
+        }
     }
 
     fn active_pane_rect(&self) -> panes::Rect {
@@ -283,10 +306,11 @@ impl App {
         if let Some(owner) = self.owner_tab(self.active_session_id) {
             self.layouts.get_mut(&owner).expect("owned pane").focused = self.active_session_id;
             for session in &mut self.inactive_sessions {
-                if self.layouts[&owner].contains(session.id) { session.unread = false; }
+                if !self.layouts[&owner].zoomed && self.layouts[&owner].contains(session.id) { session.unread = false; }
             }
         }
         self.clear_tab_interaction();
+        if self.layouts[&self.current_tab()].zoomed { self.resize_terminal(); }
     }
 
     fn switch_relative_tab(&mut self, step: isize) {
@@ -426,7 +450,7 @@ impl App {
 
     fn resize_terminal(&mut self) {
         let content = self.content_rect();
-        let rects: Vec<_> = self.layouts.values().flat_map(|layout| layout.panes(content)).collect();
+        let rects: Vec<_> = self.layouts.values().flat_map(|layout| layout.resize_panes(content, self.pane_rail_width())).collect();
         let Some(renderer) = &self.renderer else { return; };
         let mut active_changed = false;
         for (id, rect) in rects {
@@ -482,6 +506,20 @@ impl App {
     fn redraw(&mut self) {
         let draw_started = self.profile.as_ref().map(|_| Instant::now());
         let panes = self.visible_panes();
+        let rail_rect = self.layouts[&self.current_tab()].rail_rect(self.content_rect(), self.pane_rail_width());
+        let rail_entries = self.pane_rail_entries();
+        let rail_items: Vec<_> = rail_entries.iter().map(|(id, rect)| {
+            let (title, unread) = if let Some(id) = id {
+                let session = self.inactive_sessions.iter().find(|session| session.id == *id).expect("collapsed session");
+                let label = tab_naming::label_with_process(session.pty.foreground_name(),
+                    session.terminal.screen.cwd.as_deref(), session.terminal.screen.foreground_program.as_deref(),
+                    &session.terminal.screen.title, Self::tab_may_have_foreground_job(&session.terminal.screen),
+                    &self.shell_label, &self.config.tabs.name_mode, self.home_dir.as_deref(), 10);
+                let index = self.layouts[&self.current_tab()].ids().iter().position(|pane| pane == id).unwrap_or(0) + 1;
+                (format!("{index} {label}"), session.unread)
+            } else { ("Restore".into(), false) };
+            (*rect, title, unread)
+        }).collect();
         let active_rect = self.active_pane_rect();
         let native = self.native_cursor_enabled() && active_rect.width > 0 && active_rect.height > 0;
         if !native { if let Some(layer) = &mut self.native_cursor { layer.hide(); } }
@@ -496,7 +534,7 @@ impl App {
             Ok(buffer) => buffer, Err(err) => { eprintln!("rst: acquire buffer: {err}"); return; }
         };
         let stride = size.width as usize;
-        if panes.len() > 1 { buffer.fill(tabs::parse_color(&self.config.tabs.colors.inactive_background).unwrap_or(0x504945)); }
+        if panes.len() > 1 || rail_rect.is_some() { buffer.fill(tabs::parse_color(&self.config.tabs.colors.inactive_background).unwrap_or(0x504945)); }
         for (id, rect) in &panes {
             if rect.width == 0 || rect.height == 0 { continue; }
             let active = *id == self.active_session_id;
@@ -549,6 +587,10 @@ impl App {
                 render::paint_pane_focus(&mut buffer, stride, size.height as usize, *rect,
                     tabs::parse_color(&self.config.tabs.colors.accent).unwrap_or(0x83a598));
             }
+        }
+        if let Some(rail) = rail_rect {
+            renderer.draw_collapsed_panes(&mut buffer, stride, size.height as usize,
+                &self.terminal.screen, rail, &rail_items, &self.config.tabs);
         }
         if self.config.tabs.enabled {
             renderer.draw_tab_bar(&mut buffer, stride, size.height as usize, &self.terminal.screen,
@@ -865,6 +907,7 @@ impl App {
                 match action {
                     panes::Action::Split(axis) if !event.repeat => self.split_pane(axis),
                     panes::Action::Focus(direction) => self.focus_direction(direction),
+                    panes::Action::ToggleZoom if !event.repeat => self.toggle_pane_zoom(),
                     panes::Action::Close if !event.repeat && self.close_session(self.active_session_id, true) => event_loop.exit(),
                     _ => {}
                 }
@@ -1157,7 +1200,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Query only the owned PTYs' foreground process groups, at a
         // bounded frequency while a command/TUI is running. There is no
         // process-tree scan, external 'ps', or per-frame process lookup.
-        if self.config.tabs.enabled
+        if (self.config.tabs.enabled || self.layouts[&self.current_tab()].zoomed)
             && self.config.tabs.name_mode == "smart"
             && self.window.is_some()
             && self.has_foreground_job()
@@ -1312,6 +1355,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // A mouse release may be lost when the window loses focus.
                     self.mouse_reporter.reset();
+                    self.rail_mouse_grab = false;
                     self.selecting = false;
                     self.clicks.reset();
                 }
@@ -1352,6 +1396,28 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseInput { button, state, .. } => {
                 if self.help_open || self.url_picker.is_some() { return; }
+                if state == ElementState::Released && self.rail_mouse_grab {
+                    self.rail_mouse_grab = false;
+                    return;
+                }
+                if state == ElementState::Pressed {
+                    let in_rail = self.layouts[&self.current_tab()].rail_rect(self.content_rect(), self.pane_rail_width())
+                        .is_some_and(|rect| rect.contains(self.mouse.0.max(0.0) as usize, self.mouse.1.max(0.0) as usize));
+                    if in_rail {
+                        if button == MouseButton::Left {
+                            if let Some((id, _)) = self.pane_rail_entries().into_iter().find(|(_, rect)|
+                                rect.contains(self.mouse.0.max(0.0) as usize, self.mouse.1.max(0.0) as usize))
+                            {
+                                if let Some(id) = id { self.focus_session(id); } else { self.toggle_pane_zoom(); }
+                            }
+                        }
+                        // Consume the matching release even if Restore removes
+                        // the sidebar before it arrives. Active-pane drags may
+                        // still release over the sidebar and finish normally.
+                        self.rail_mouse_grab = true;
+                        return;
+                    }
+                }
                 if self.mouse_in_bar() {
                     if button == MouseButton::Left && state == ElementState::Pressed {
                         match self.tab_bar_action() {
@@ -1530,7 +1596,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if session_id != self.active_session_id {
                     // Split siblings redraw on output. Hidden tabs parse and
                     // answer queries, repainting only metadata/unread changes.
-                    let visible = self.layouts[&self.current_tab()].contains(session_id);
+                    let visible = self.visible_panes().iter().any(|(id, _)| *id == session_id);
                     let mut became_unread = visible;
                     if let Some(tab) = self.inactive_sessions.iter_mut()
                         .find(|tab| tab.id == session_id)
@@ -1722,6 +1788,7 @@ fn main() -> Result<()> {
         selection: None,
         clicks: ClickTracker::default(),
         selecting: false,
+        rail_mouse_grab: false,
         next_cursor_blink: Instant::now()
             + Duration::from_millis(config_blink_ms),
         next_text_blink: Instant::now() + Duration::from_millis(800),
