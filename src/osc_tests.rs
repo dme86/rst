@@ -30,8 +30,12 @@ fn osc_title_works_when_split_across_multiple_reads() {
     let mut t = terminal();
     t.advance(b"\x1b]2;Hello");
     assert_eq!(t.screen.title, DEFAULT_TITLE);
-    t.advance(b"; world\x1b");
+    t.advance(b"; world");
     assert_eq!(t.screen.title, DEFAULT_TITLE);
+    // vte 0.15 dispatches OSC on ESC (the first byte of ST), not
+    // on the trailing backslash. This is correct for its parser.
+    t.advance(b"\x1b");
+    assert_eq!(t.screen.title, "Hello; world");
     t.advance(b"\\");
     assert_eq!(t.screen.title, "Hello; world");
 }
