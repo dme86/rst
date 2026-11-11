@@ -266,7 +266,7 @@ impl Renderer {
             self.shape_cache.insert(cache_key, result.clone());
             result
         };
-        if shaped.total_advance <= 0 || shaped.units_per_em <= 0.0
+        if shaped.total_advance == 0 || shaped.units_per_em <= 0.0
             || shaped.glyphs.iter().any(|glyph| glyph.index == 0)
         {
             // Missing-glyph output must use the legacy font fallback rather
@@ -275,7 +275,7 @@ impl Renderer {
         }
 
         let em_scale = self.font_size / shaped.units_per_em;
-        let natural = shaped.total_advance as f32 * em_scale;
+        let natural = shaped.total_advance.unsigned_abs() as f32 * em_scale;
         let horizontal = slot_width as f32 / natural;
         // Extremely non-monospace fallback faces should not stretch a
         // single glyph beyond recognition; use legacy rendering instead.
@@ -291,7 +291,16 @@ impl Renderer {
             self.styled_fonts[face.0][face.1 as usize - 1]
                 .as_ref().expect("variant selected from available face")
         };
-        let mut pen: i64 = 0;
+        if shaped.glyphs.iter().any(|glyph| glyph.index >= face_font.glyph_count()) {
+            return false;
+        }
+        // Some RTL shapers express advances as negative design units.
+        // Start those runs at the right edge while preserving grid width.
+        let mut pen: i64 = if shaped.total_advance < 0 {
+            -shaped.total_advance
+        } else {
+            0
+        };
         for item in &shaped.glyphs {
             let gid = item.index;
             let size = self.font_size;
