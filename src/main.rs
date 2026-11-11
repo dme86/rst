@@ -27,7 +27,7 @@ use crate::{
     mouse::MouseReporter,
     pty::{PtySession, UserEvent},
     render::Renderer,
-    terminal::{Palette, Terminal},
+    terminal::{CursorShape, CursorStyle, Palette, Terminal},
 };
 
 struct App {
@@ -182,7 +182,7 @@ impl App {
     }
 
     fn reset_cursor_blink(&mut self) {
-        if !self.config.cursor.blink {
+        if !self.terminal.screen.cursor_style.blink {
             return;
         }
         self.next_cursor_blink =
@@ -334,7 +334,7 @@ impl ApplicationHandler<UserEvent> for App {
 
         // The cursor and SGR 5/6 text blink on *independent* clocks.
         // Hiding the cursor with DECTCEM must not freeze blinking text.
-        if self.config.cursor.blink
+        if self.terminal.screen.cursor_style.blink
             && self.terminal.screen.show_cursor
             && self.window.is_some()
         {
@@ -582,7 +582,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Output(bytes) => {
                 let previous_mouse_mode = self.terminal.screen.mouse_tracking;
                 let previous_title = self.terminal.screen.title.clone();
+                let previous_cursor_style = self.terminal.screen.cursor_style;
                 self.terminal.advance(&bytes);
+                if self.terminal.screen.cursor_style != previous_cursor_style {
+                    self.next_cursor_blink = Instant::now()
+                        + Duration::from_millis(self.config.cursor.blink_interval_ms);
+                }
                 if self.terminal.screen.title != previous_title {
                     if let Some(window) = &self.window {
                         window.set_title(&self.terminal.screen.title);
@@ -645,6 +650,16 @@ fn main() -> Result<()> {
         palette,
     );
     terminal.screen.osc52_write_allowed = config.clipboard.enabled && config.clipboard.osc52_write;
+    let shape = match config.cursor.style.as_str() {
+        "block" => CursorShape::Block,
+        "underline" => CursorShape::Underline,
+        "bar" => CursorShape::Bar,
+        _ => unreachable!("validated cursor style"),
+    };
+    terminal.screen.set_default_cursor_style(CursorStyle {
+        shape,
+        blink: config.cursor.blink,
+    });
     let original_font_size = config.font.size;
     let config_blink_ms = config.cursor.blink_interval_ms;
     let mut app = App {
