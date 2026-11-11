@@ -39,6 +39,10 @@ enabled = true
 audible = true
 visual = true
 
+[command_output]
+# Per-command capture cap, independent from [scrollback] lines (1-128 MiB).
+max_megabytes = 32
+
 [clipboard]
 enabled = true
 copy_on_select = false
