@@ -1471,4 +1471,52 @@ mod tests {
         assert_eq!(short, [0, 0, 0]); // incomplete scanline stays intact
     }
 
+
+    #[test]
+    fn composing_text_is_a_visual_overlay_not_mutated_terminal_cells() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else {
+            return; // Some CI hosts have no discoverable monospace fonts.
+        };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(12, 3, 0, palette);
+        terminal.advance(b"hello\x1b[3G");
+        let preedit = crate::ime::Preedit {
+            text: "界界".into(),
+            cursor: Some((3, 3)),
+        };
+        let width = renderer.cell_width * terminal.screen.cols;
+        let height = renderer.cell_height * terminal.screen.rows;
+        let mut base_pixels = vec![0u32; width * height];
+        renderer.draw(&mut base_pixels, width, height, &terminal.screen, None, None);
+        let mut composing_pixels = vec![0u32; width * height];
+        renderer.draw(&mut composing_pixels, width, height, &terminal.screen, None, Some(&preedit));
+
+        assert_ne!(base_pixels, composing_pixels);
+        assert_eq!(terminal.screen.grid[0][2].ch, 'l');
+        assert_eq!(terminal.screen.grid[0][3].ch, 'l');
+        assert!(terminal.screen.history.is_empty());
+    }
+
+    #[test]
+    fn ime_preview_draws_selection_background_at_grapheme_cell() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(8, 2, 0, palette);
+        terminal.advance(b"\x1b[?25l"); // hide ordinary block cursor
+        let preedit = crate::ime::Preedit {
+            text: "abc".into(),
+            cursor: None,
+        };
+        let width = renderer.cell_width * terminal.screen.cols;
+        let height = renderer.cell_height * terminal.screen.rows;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &terminal.screen, None, Some(&preedit));
+        assert_eq!(pixels[0], terminal.screen.palette.selection);
+        assert_eq!(terminal.screen.grid[0][0].ch, ' ');
+    }
+
 }
