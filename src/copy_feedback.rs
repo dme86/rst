@@ -80,7 +80,7 @@ impl CopyNotice {
             return None;
         }
         let elapsed = now.saturating_duration_since(self.started);
-        if elapsed < FADE_IN || elapsed > HOLD_UNTIL {
+        if elapsed < FADE_IN || elapsed >= HOLD_UNTIL {
             Some((now + FRAME).min(self.started + TOTAL))
         } else {
             Some(self.started + HOLD_UNTIL)
