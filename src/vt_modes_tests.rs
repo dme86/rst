@@ -350,3 +350,33 @@ fn decstr_retains_custom_tab_stops_but_ris_clears_them() {
     t.advance(b"\x1bc\t");
     assert_eq!(t.screen.x, 8);
 }
+
+#[test]
+fn decaln_alignment_fills_screen_without_moving_cursor_or_losing_style() {
+    let mut t = term(5, 3);
+    t.advance(b"\x1b[3;31m\x1b[2;3H\x1b#8");
+    assert_eq!((t.screen.x, t.screen.y), (2, 1));
+    for row in &t.screen.grid {
+        for cell in row {
+            assert_eq!(cell.ch, 'E');
+            assert_eq!(cell.fg, t.screen.palette.ansi[1]);
+            assert!(cell.style.contains(TextStyle::ITALIC));
+        }
+    }
+    t.advance(b"\x1b[?1049h\x1b#8");
+    assert!(t.screen.in_alternate_screen());
+    assert_eq!(t.screen.grid[2][4].ch, 'E');
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.screen.grid[2][4].ch, 'E');
+}
+
+#[test]
+fn decaln_unknown_intermediates_do_not_trigger_cursor_restore() {
+    let mut t = term(5, 3);
+    t.advance(b"\x1b[2;3H\x1b7\x1b[1;1H");
+    // Unknown ESC # 7 must not behave like ESC 7 or ESC 8.
+    t.advance(b"\x1b#7");
+    assert_eq!((t.screen.x, t.screen.y), (0, 0));
+    t.advance(b"\x1b8");
+    assert_eq!((t.screen.x, t.screen.y), (2, 1));
+}
