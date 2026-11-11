@@ -1533,6 +1533,10 @@ mod attention_tests;
 mod grapheme_tests;
 
 #[cfg(test)]
+#[path = "command_capture_tests.rs"]
+mod command_capture_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
