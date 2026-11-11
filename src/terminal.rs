@@ -10,6 +10,45 @@ pub const DEFAULT_TITLE: &str = "rst — Rust Simple Terminal";
 /// Compact, per-cell SGR attributes. Like st's ATTR_* bitmask, these must
 /// travel with each glyph through scrollback, insert/delete, and alternate
 /// screen swaps instead of living only in the current cursor state.
+/// Cursor geometry is independent from the glyph's SGR attributes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Underline,
+    Bar,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorStyle {
+    pub shape: CursorShape,
+    pub blink: bool,
+}
+
+impl Default for CursorStyle {
+    fn default() -> Self {
+        Self { shape: CursorShape::Block, blink: true }
+    }
+}
+
+impl CursorStyle {
+    /// DECSCUSR: CSI Ps SP q. Unknown values leave the cursor unchanged.
+    /// Ps=0 restores the user's configured default.
+    pub fn from_decscusr(param: u16, default: Self) -> Option<Self> {
+        let (shape, blink) = match param {
+            0 => return Some(default),
+            1 => (CursorShape::Block, true),
+            2 => (CursorShape::Block, false),
+            3 => (CursorShape::Underline, true),
+            4 => (CursorShape::Underline, false),
+            5 => (CursorShape::Bar, true),
+            6 => (CursorShape::Bar, false),
+            _ => return None,
+        };
+        Some(Self { shape, blink })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TextStyle(u8);
 
@@ -169,6 +208,8 @@ pub struct Screen {
     pub show_cursor: bool,
     // UI blink phase, independent of DECTCEM visibility (CSI ?25 h/l).
     pub cursor_blink_on: bool,
+    pub cursor_style: CursorStyle,
+    default_cursor_style: CursorStyle,
     // Blink attribute (SGR 5/6) animates independently of the cursor.
     pub text_blink_on: bool,
     pub app_cursor: bool,
@@ -206,6 +247,21 @@ pub struct Screen {
 }
 
 impl Screen {
+    /// Configure the initial cursor; DECSCUSR 0 and RIS restore this style.
+    pub fn set_default_cursor_style(&mut self, style: CursorStyle) {
+        self.default_cursor_style = style;
+        self.cursor_style = style;
+        self.cursor_blink_on = true;
+    }
+
+    fn set_decscusr(&mut self, param: u16) {
+        if let Some(style) = CursorStyle::from_decscusr(param, self.default_cursor_style) {
+            self.cursor_style = style;
+            // A newly selected shape must be visible immediately.
+            self.cursor_blink_on = true;
+        }
+    }
+
     pub fn new(cols: usize, rows: usize, history_limit: usize, palette: Palette) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
@@ -228,6 +284,8 @@ impl Screen {
             y: 0,
             show_cursor: true,
             cursor_blink_on: true,
+            cursor_style: CursorStyle::default(),
+            default_cursor_style: CursorStyle::default(),
             text_blink_on: true,
             app_cursor: false,
             app_keypad: false,
@@ -966,6 +1024,8 @@ impl Screen {
         self.app_keypad = false;
         self.reverse_video = false;
         self.show_cursor = true;
+        self.cursor_style = self.default_cursor_style;
+        self.cursor_blink_on = true;
         self.mouse_tracking = MouseTracking::Off;
         self.mouse_sgr = false;
         self.focus_reporting = false;
@@ -1090,6 +1150,12 @@ impl Perform for Screen {
             .map(|value| value.first().copied().unwrap_or(0))
             .collect();
         let n = |index: usize| values.get(index).copied().unwrap_or(0).max(1) as usize;
+        // DECSCUSR has a literal SPACE intermediate (0x20) followed by q.
+        // Do not mistake a plain CSI q or an unrelated CSI intermediate for it.
+        if intermediates == b" " && action == 'q' {
+            self.set_decscusr(values.first().copied().unwrap_or(0));
+            return;
+        }
         let private = intermediates.contains(&b'?');
         if action == 'p' && intermediates.contains(&b'$') {
             for mode in values.iter().copied() {
@@ -1275,8 +1341,10 @@ impl Perform for Screen {
                 let limit = self.history_limit;
                 let palette = self.initial_palette.clone();
                 let osc52_allowed = self.osc52_write_allowed;
+                let default_cursor_style = self.default_cursor_style;
                 *self = Self::new(cols, rows, limit, palette);
                 self.osc52_write_allowed = osc52_allowed;
+                self.set_default_cursor_style(default_cursor_style);
             }
             _ => {}
         }
@@ -1308,6 +1376,10 @@ mod vt_modes_tests;
 #[cfg(test)]
 #[path = "osc_tests.rs"]
 mod osc_tests;
+
+#[cfg(test)]
+#[path = "cursor_tests.rs"]
+mod cursor_tests;
 
 #[cfg(test)]
 mod tests {

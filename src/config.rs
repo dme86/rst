@@ -75,6 +75,10 @@ pub fn path() -> PathBuf {
     base.join("rst").join("config.toml")
 }
 
+fn supported_cursor_style(style: &str) -> bool {
+    matches!(style, "block" | "underline" | "bar")
+}
+
 // Merge user tables recursively; unspecified settings retain the embedded defaults.
 fn merge(base: &mut toml::Value, override_value: toml::Value) {
     if let (Some(base_table), toml::Value::Table(override_table)) =
@@ -110,7 +114,7 @@ pub fn load() -> Result<Config> {
     anyhow::ensure!(config.window.columns > 0 && config.window.rows > 0, "window size must be positive");
     anyhow::ensure!(config.font.size >= 6.0 && config.font.size <= 72.0, "font size must be 6..72");
     anyhow::ensure!(config.window.padding <= 128, "padding must be <= 128");
-    anyhow::ensure!(config.cursor.style == "block", "only cursor.style = 'block' is supported in v0.1");
+    anyhow::ensure!(supported_cursor_style(&config.cursor.style), "cursor.style must be block, underline, or bar");
     anyhow::ensure!((100..=3000).contains(&config.cursor.blink_interval_ms), "cursor.blink_interval_ms must be 100..3000");
     Ok(config)
 }
@@ -118,6 +122,19 @@ pub fn load() -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_style_config_supports_block_underline_and_bar() {
+        let config: Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert_eq!(config.cursor.style, "block");
+        for name in ["block", "underline", "bar"] {
+            assert!(supported_cursor_style(name));
+        }
+        for name in ["", "beam", "hollow", "BLOCK"] {
+            assert!(!supported_cursor_style(name));
+        }
+    }
 
     #[test]
     fn bundled_default_uses_requested_background() {
