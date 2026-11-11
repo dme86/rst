@@ -211,6 +211,38 @@ The corresponding state and rendering tests are in `src/terminal.rs` and
 `src/render.rs`. Extended SGR underline styles/colors and font ligatures are
 outside vanilla st parity and remain future work.
 
+### Native IME and composition preview (macOS / Wayland)
+
+`rst` enables winit's native input method support when creating its window.
+On macOS this integrates with the system's text input sources, including
+dead-key accents and Japanese/Chinese/Korean input methods; on Wayland it
+uses the compositor's text-input support (availability depends on compositor
+and input method). `XIM` itself is an X11-specific API and is not used by
+rst's macOS/Wayland-only backends.
+
+- `Ime::Preedit` is displayed as a temporary, underlined overlay at the
+  terminal cursor. It does **not** modify the PTY or the screen buffer.
+- `Ime::Commit` sends the final UTF-8 text exactly once to the child.
+  An IME cancel, loss of focus, empty composition or `Ime::Disabled` clears
+  the preview without inserting text.
+- Native candidate popups follow the preedit caret through
+  `Window::set_ime_cursor_area`, including cursor moves and window resizing.
+- UTF-8 byte positions are converted to grapheme-aware terminal cells.
+  Full-width CJK text, combined accents and emoji sequences are not split
+  across cells during preview layout. Long compositions can wrap.
+- Ordinary function keys, Ctrl/Alt combinations and window shortcuts
+  still use the existing keyboard encoder outside composition.
+
+**Current renderer limitation:** `fontdue` rasterizes individual glyphs;
+complex-script shaping, advanced ligatures and joined emoji appearance are
+not yet equivalent to a HarfBuzz-based text renderer. The OS handles
+candidate selection and text composition; only the final committed text
+is written to the terminal application's PTY.
+
+Regression tests: `src/ime_tests.rs` and preedit overlay tests in
+`src/render.rs`. Manual validation should cover macOS Japanese/Korean/
+Chinese input and a Wayland compositor with text-input-v3 support.
+
 ### Keyboard compatibility
 
 rst sends the traditional st/xterm keyboard sequences for F1–F12 (plus
@@ -340,7 +372,7 @@ To inspect which font families rst found and identify missing glyph codepoints, 
 
 One window and one PTY, with an owned terminal grid, ANSI parser, basic VT operations, 24-bit color, font fallback, bounded scrollback and native copy/paste. No tabs, shell integration, Electron, GTK, X11, or XWayland. On Linux, the windowing backend is **Wayland-only**.
 
-This is a work-in-progress: extended VT modes, IME, grapheme shaping, complete alt-screen compatibility, font ligatures and richer OSC security prompts remain to be implemented/tested. Linux clipboard integration currently relies on compositor data-control support; the macOS native clipboard is the primary first-run target.
+This is a work-in-progress: extended VT modes, complex grapheme shaping, complete alt-screen compatibility, font ligatures and richer OSC security prompts remain to be implemented/tested. Linux clipboard integration currently relies on compositor data-control support; the macOS native clipboard is the primary first-run target.
 
 ## Inspiration and attribution
 

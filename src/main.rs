@@ -1,6 +1,7 @@
 mod attention;
 mod charset;
 mod config;
+mod ime;
 mod keyboard;
 mod mouse;
 mod osc;
@@ -15,7 +16,7 @@ use anyhow::Result;
 use softbuffer::{Context, Surface};
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
     keyboard::{Key, ModifiersState, NamedKey},
@@ -28,6 +29,7 @@ use crate::{
     attention::{BellLimiter, FocusTracker, VISUAL_BELL_DURATION},
     config::Config,
     keyboard::{encode_key, KeyboardModes},
+    ime::{self, ImeState},
     mouse::MouseReporter,
     pty::{PtySession, UserEvent},
     render::Renderer,
@@ -45,6 +47,7 @@ struct App {
     surface: Option<Surface<OwnedDisplayHandle, Arc<Window>>>,
     renderer: Option<Renderer>,
     modifiers: ModifiersState,
+    ime: ImeState,
     mouse: (f64, f64),
     mouse_reporter: MouseReporter,
     selection: Option<Selection>,
@@ -78,6 +81,30 @@ impl App {
                 .resize(cols, rows, renderer.cell_width, renderer.cell_height);
         }
         window.request_redraw();
+        self.update_ime_cursor_area();
+    }
+
+    /// Keep native candidate popups adjacent to the composition caret.
+    /// winit consumes physical, window-local pixel coordinates.
+    fn update_ime_cursor_area(&self) {
+        let (Some(window), Some(renderer)) = (&self.window, &self.renderer) else {
+            return;
+        };
+        let screen = &self.terminal.screen;
+        let (col, row) = if let Some(ref preedit) = self.ime.preedit {
+            ime::layout(preedit, screen.cols, screen.rows, (screen.x, screen.y)).candidate
+        } else {
+            (screen.x.min(screen.cols.saturating_sub(1)),
+             screen.y.min(screen.rows.saturating_sub(1)))
+        };
+        let x = renderer.padding.saturating_add(col.saturating_mul(renderer.cell_width));
+        let y = renderer.padding.saturating_add(row.saturating_mul(renderer.cell_height));
+        window.set_ime_cursor_area(
+            PhysicalPosition::new(x.min(i32::MAX as usize) as i32,
+                                  y.min(i32::MAX as usize) as i32),
+            PhysicalSize::new(renderer.cell_width.min(u32::MAX as usize) as u32,
+                              renderer.cell_height.min(u32::MAX as usize) as u32),
+        );
     }
 
     fn redraw(&mut self) {
@@ -109,6 +136,7 @@ impl App {
             size.height as usize,
             &self.terminal.screen,
             self.selection,
+            self.ime.preedit.as_ref(),
         );
         if self.bell_flash_until.is_some_and(|until| Instant::now() < until) {
             render::paint_bell_border(
@@ -248,7 +276,9 @@ impl App {
     }
 
     fn handle_key(&mut self, event: KeyEvent) {
-        if event.state != ElementState::Pressed {
+        if event.state != ElementState::Pressed || self.ime.composing() {
+            // While composing, text keys belong to the IME, not the PTY.
+            // winit normally suppresses them; this is a defensive guard.
             return;
         }
         // Typing wakes the cursor and restarts the blink interval.
@@ -488,6 +518,11 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.surface = Some(surface);
+        // Not enabled by default in winit. This activates native macOS
+        // text services and Wayland text-input where supported.
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(true);
+        }
         self.resize_terminal();
     }
 
@@ -515,6 +550,19 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(event),
+            WindowEvent::Ime(event) => {
+                let committed = self.ime.handle(event, self.terminal.screen.keyboard_lock);
+                if let Some(bytes) = committed {
+                    if !bytes.is_empty() {
+                        self.pty.write(&bytes);
+                        self.reset_cursor_blink();
+                    }
+                }
+                self.update_ime_cursor_area();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::Focused(focused) => {
                 // DECSET 1004: only real focus transitions reach the PTY.
                 // Remember focus even while reporting is disabled, so
@@ -529,6 +577,11 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_user_attention(None);
                     }
                 } else {
+                    // Uncommitted composition is never sent to the child.
+                    self.ime.clear();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                     // A mouse release may be lost when the window loses focus.
                     self.mouse_reporter.reset();
                     self.selecting = false;
@@ -729,6 +782,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if !replies.is_empty() {
                     self.pty.write(&replies);
                 }
+                self.update_ime_cursor_area();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -782,6 +836,7 @@ fn main() -> Result<()> {
         surface: None,
         renderer: None,
         modifiers: ModifiersState::empty(),
+        ime: ImeState::default(),
         mouse: (0.0, 0.0),
         mouse_reporter: MouseReporter::default(),
         selection: None,

@@ -3,9 +3,12 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use fontdb::{Database, Family, Query, Style, Weight};
 use fontdue::{Font, FontSettings, Metrics};
+use unicode_normalization::UnicodeNormalization;
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
     config::FontConfig,
+    ime::{self, Preedit},
     terminal::{Cell, CursorShape, Screen, TextStyle},
     selection::Selection,
 };
@@ -241,8 +244,9 @@ impl Renderer {
         height: usize,
         screen: &Screen,
         selection: Option<Selection>,
+        preedit: Option<&Preedit>,
     ) {
-        paint_backgrounds(
+        paint_backgrounds_with_cursor(
             pixels,
             width,
             height,
@@ -251,6 +255,7 @@ impl Renderer {
             self.cell_height,
             self.padding,
             selection,
+            preedit.is_none(),
         );
 
         for row in 0..screen.rows {
@@ -266,7 +271,9 @@ impl Renderer {
                 if x >= width {
                     break;
                 }
-                let (_, bg) = cell_colors(screen, row, col, cell, selection);
+                let (_, bg) = cell_colors_with_cursor(
+                    screen, row, col, cell, selection, preedit.is_none(),
+                );
                 rect(
                     pixels,
                     width,
@@ -296,7 +303,9 @@ impl Renderer {
                 if !cell.style.visible(screen.text_blink_on) {
                     continue;
                 }
-                let (fg, bg) = cell_colors(screen, row, col, cell, selection);
+                let (fg, bg) = cell_colors_with_cursor(
+                    screen, row, col, cell, selection, preedit.is_none(),
+                );
                 let ink = effective_ink_color(cell.style, fg, bg);
                 if cell.ch != ' ' {
                     let spill = icon_spill(screen, row, col, cell, selection, self.cell_width);
@@ -314,8 +323,85 @@ impl Renderer {
 
         // Unlike the block cursor, underline and bar must be painted over
         // the completed glyphs. Otherwise the text can hide the thin stroke.
-        paint_cursor(pixels, width, height, screen,
-                     self.cell_width, self.cell_height, self.padding);
+        if preedit.is_none() {
+            paint_cursor(pixels, width, height, screen,
+                         self.cell_width, self.cell_height, self.padding);
+        }
+        if let Some(preedit) = preedit {
+            self.draw_preedit(pixels, width, height, screen, preedit);
+        }
+    }
+
+    /// Render composition above the already drawn terminal grid. No cell
+    /// or scrollback mutation occurs until winit emits Ime::Commit.
+    fn draw_preedit(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        screen: &Screen,
+        preedit: &Preedit,
+    ) {
+        if screen.view_offset != 0 {
+            return;
+        }
+        let layout = ime::layout(preedit, screen.cols, screen.rows, (screen.x, screen.y));
+        let cell_w = self.cell_width;
+        let cell_h = self.cell_height;
+        let padding = self.padding;
+        let ascent = self.ascent;
+        let font_size = self.font_size;
+        for glyph in layout.glyphs {
+            let x = padding.saturating_add(glyph.col.saturating_mul(cell_w));
+            let y = padding.saturating_add(glyph.row.saturating_mul(cell_h));
+            let cell_width = glyph.cells * cell_w;
+            let bg = if glyph.selected { screen.palette.cursor }
+                else { screen.palette.selection };
+            let fg = if glyph.selected { screen.palette.background }
+                else { screen.palette.foreground };
+            rect(pixels, width, height, x, y, cell_width, cell_h, bg);
+
+            // Copy the existing Cell layout rather than rebuilding all of
+            // its color-provenance fields. Only the temporary overlay is
+            // changed; the actual terminal buffer stays untouched.
+            if let Some(&original) = screen.display_row(glyph.row).get(glyph.col) {
+                let mut cell = original;
+                // NFC composes common dead-key sequences (e + combining
+                // acute => é), so the preview does not silently drop the
+                // accent while the OS is still composing the input.
+                let composed: String = glyph.text.nfc().collect();
+                let mut chars = composed.chars();
+                cell.ch = chars.next().unwrap_or(' ');
+                cell.width = glyph.cells as u8;
+                cell.style = TextStyle::UNDERLINE;
+                if cell.ch != ' ' && !cell.ch.is_control() {
+                    self.draw_glyph(pixels, width, height, x, y, cell, fg, (0, 0));
+                }
+                // Remaining combining marks have zero advance: overlay
+                // their glyph where supported by the selected font. ZWJ
+                // scripts still require a shaping engine in the future.
+                for mark in chars {
+                    if UnicodeWidthChar::width(mark) == Some(0)
+                        && !matches!(mark, '\u{200d}' | '\u{fe0f}')
+                    {
+                        cell.ch = mark;
+                        self.draw_glyph(pixels, width, height, x, y, cell, fg, (0, 0));
+                    }
+                }
+                // A thin underline indicates ongoing, uncommitted input.
+                paint_decorations(
+                    pixels, width, height, x, y,
+                    cell_width, cell_h, ascent, font_size,
+                    TextStyle::UNDERLINE, fg,
+                );
+            }
+        }
+        if let Some((col, row)) = layout.caret {
+            let x = padding.saturating_add(col.saturating_mul(cell_w));
+            let y = padding.saturating_add(row.saturating_mul(cell_h));
+            rect(pixels, width, height, x, y, 2.min(cell_w), cell_h,
+                 screen.palette.cursor);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -753,6 +839,7 @@ fn sample_glyph(glyph: &Glyph, x: usize, y: usize, dest_w: usize, dest_h: usize)
 /// application-provided cell colors reach every window edge.
 ///
 /// An explicit nonzero padding is still respected as a user preference.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn paint_backgrounds(
     pixels: &mut [u32],
@@ -763,6 +850,24 @@ fn paint_backgrounds(
     cell_height: usize,
     padding: usize,
     selection: Option<Selection>,
+) {
+    paint_backgrounds_with_cursor(
+        pixels, width, height, screen,
+        cell_width, cell_height, padding, selection, true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_backgrounds_with_cursor(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    screen: &Screen,
+    cell_width: usize,
+    cell_height: usize,
+    padding: usize,
+    selection: Option<Selection>,
+    show_cursor: bool,
 ) {
     pixels.fill(if screen.reverse_video {
         screen.palette.foreground
@@ -795,7 +900,9 @@ fn paint_backgrounds(
             if x >= width {
                 break;
             }
-            let (_, background) = cell_colors(screen, row, col, cell, selection);
+            let (_, background) = cell_colors_with_cursor(
+                screen, row, col, cell, selection, show_cursor,
+            );
             let start_x = if col == 0 { 0 } else { x };
             let end_x = if col + cell.width as usize >= screen.cols {
                 width
@@ -869,8 +976,19 @@ fn cell_colors(
     cell: Cell,
     selection: Option<Selection>,
 ) -> (u32, u32) {
+    cell_colors_with_cursor(screen, row, col, cell, selection, true)
+}
+
+fn cell_colors_with_cursor(
+    screen: &Screen,
+    row: usize,
+    col: usize,
+    cell: Cell,
+    selection: Option<Selection>,
+    show_cursor: bool,
+) -> (u32, u32) {
     let selected = selection.is_some_and(|selection| selection.contains(screen, col, row));
-    let cursor = cursor_is_visible(screen)
+    let cursor = show_cursor && cursor_is_visible(screen)
         && screen.cursor_style.shape == CursorShape::Block
         && row == screen.y
         && col == screen.x.min(screen.cols - 1);
@@ -1408,6 +1526,80 @@ mod tests {
         let mut short = [0u32; 3];
         paint_bell_border(&mut short, 4, 100, 0xffffff);
         assert_eq!(short, [0, 0, 0]); // incomplete scanline stays intact
+    }
+
+
+    #[test]
+    fn composing_text_is_a_visual_overlay_not_mutated_terminal_cells() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else {
+            return; // Some CI hosts have no discoverable monospace fonts.
+        };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(12, 3, 0, palette);
+        terminal.advance(b"hello\x1b[3G");
+        let preedit = crate::ime::Preedit {
+            text: "界界".into(),
+            cursor: Some((3, 3)),
+        };
+        let width = renderer.cell_width * terminal.screen.cols;
+        let height = renderer.cell_height * terminal.screen.rows;
+        let mut base_pixels = vec![0u32; width * height];
+        renderer.draw(&mut base_pixels, width, height, &terminal.screen, None, None);
+        let mut composing_pixels = vec![0u32; width * height];
+        renderer.draw(&mut composing_pixels, width, height, &terminal.screen, None, Some(&preedit));
+
+        assert_ne!(base_pixels, composing_pixels);
+        assert_eq!(terminal.screen.grid[0][2].ch, 'l');
+        assert_eq!(terminal.screen.grid[0][3].ch, 'l');
+        assert!(terminal.screen.history.is_empty());
+    }
+
+    #[test]
+    fn ime_preview_draws_selection_background_at_grapheme_cell() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(8, 2, 0, palette);
+        terminal.advance(b"\x1b[?25l"); // hide ordinary block cursor
+        let preedit = crate::ime::Preedit {
+            text: "abc".into(),
+            cursor: None,
+        };
+        let width = renderer.cell_width * terminal.screen.cols;
+        let height = renderer.cell_height * terminal.screen.rows;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &terminal.screen, None, Some(&preedit));
+        assert_eq!(pixels[0], terminal.screen.palette.selection);
+        assert_eq!(terminal.screen.grid[0][0].ch, ' ');
+    }
+
+
+    #[test]
+    fn ime_composition_hides_the_original_cursor_even_when_preview_wraps() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(4, 3, 0, palette);
+        terminal.advance(b"\x1b[3;4H"); // last column of last row
+        let preedit = crate::ime::Preedit { text: "界".into(), cursor: Some((3, 3)) };
+        let width = renderer.cell_width * terminal.screen.cols;
+        let height = renderer.cell_height * terminal.screen.rows;
+        let x = 3 * renderer.cell_width;
+        let y = 2 * renderer.cell_height;
+
+        let mut ordinary = vec![0u32; width * height];
+        renderer.draw(&mut ordinary, width, height, &terminal.screen, None, None);
+        let mut composing = vec![0u32; width * height];
+        renderer.draw(&mut composing, width, height, &terminal.screen, None, Some(&preedit));
+
+        assert_eq!(ordinary[y * width + x], terminal.screen.palette.cursor);
+        assert_eq!(composing[y * width + x], terminal.screen.palette.background);
+        assert_eq!(terminal.screen.x, 3);
+        assert_eq!(terminal.screen.y, 2);
     }
 
 }
