@@ -158,3 +158,19 @@ fn selection_of_blank_rectangle_retains_line_structure() {
     sel.update(&t.screen, (3, 1), true);
     assert_eq!(sel.text(&t.screen), "b\n");
 }
+
+#[test]
+fn resizing_keeps_history_addressable_by_selection() {
+    let mut t = terminal(4, 2);
+    t.advance(b"one\r\ntwo\r\nend");
+    assert!(!t.screen.history.is_empty());
+    t.screen.resize(7, 2);
+    assert_eq!(t.screen.history[0].len(), 7);
+    assert_eq!(t.screen.display_row(0).len(), 7);
+    t.screen.scroll_view(1);
+    let sel = Selection::new(&t.screen, (1, 0), SelectionSnap::Word, false);
+    assert_eq!(sel.text(&t.screen), "one");
+    t.screen.resize(3, 2);
+    assert_eq!(t.screen.history[0].len(), 3);
+    assert_eq!(t.screen.display_row(0).len(), 3);
+}
