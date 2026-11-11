@@ -630,6 +630,8 @@ impl Screen {
                 0 => {
                     self.fg = self.palette.foreground;
                     self.bg = self.palette.background;
+                    self.fg_source = ColorSource::DefaultForeground;
+                    self.bg_source = ColorSource::DefaultBackground;
                     self.style = TextStyle::default();
                 }
                 1 => self.style.set(TextStyle::BOLD, true),
@@ -650,32 +652,58 @@ impl Screen {
                 27 => self.style.set(TextStyle::REVERSE, false),
                 28 => self.style.set(TextStyle::INVISIBLE, false),
                 29 => self.style.set(TextStyle::STRUCK, false),
-                30..=37 => self.fg = self.palette.ansi[(params[i] - 30) as usize],
-                40..=47 => self.bg = self.palette.ansi[(params[i] - 40) as usize],
-                90..=97 => self.fg = self.palette.ansi[(params[i] - 90 + 8) as usize],
-                100..=107 => self.bg = self.palette.ansi[(params[i] - 100 + 8) as usize],
-                39 => self.fg = self.palette.foreground,
-                49 => self.bg = self.palette.background,
+                30..=37 => {
+                    let index = (params[i] - 30) as u8;
+                    self.fg_source = ColorSource::Indexed(index);
+                    self.fg = self.indexed_color(index);
+                },
+                40..=47 => {
+                    let index = (params[i] - 40) as u8;
+                    self.bg_source = ColorSource::Indexed(index);
+                    self.bg = self.indexed_color(index);
+                },
+                90..=97 => {
+                    let index = (params[i] - 90 + 8) as u8;
+                    self.fg_source = ColorSource::Indexed(index);
+                    self.fg = self.indexed_color(index);
+                },
+                100..=107 => {
+                    let index = (params[i] - 100 + 8) as u8;
+                    self.bg_source = ColorSource::Indexed(index);
+                    self.bg = self.indexed_color(index);
+                },
+                39 => {
+                    self.fg = self.palette.foreground;
+                    self.fg_source = ColorSource::DefaultForeground;
+                },
+                49 => {
+                    self.bg = self.palette.background;
+                    self.bg_source = ColorSource::DefaultBackground;
+                },
                 38 | 48 => {
                     let is_fg = params[i] == 38;
                     let value = if params.get(i + 1) == Some(&2) && i + 4 < params.len() {
                         i += 4;
-                        Some(
+                        Some((
                             ((params[i - 2].min(255) as u32) << 16)
                                 | ((params[i - 1].min(255) as u32) << 8)
                                 | params[i].min(255) as u32,
-                        )
+                            ColorSource::Direct,
+                        ))
                     } else if params.get(i + 1) == Some(&5) && i + 2 < params.len() {
                         i += 2;
-                        Some(self.indexed_color(params[i] as u8))
+                        let index = params[i].min(255) as u8;
+                        Some((self.indexed_color(index), ColorSource::Indexed(index)))
                     } else {
                         None
                     };
-                    if let Some(color) = value {
+                    if let Some((color, source)) = value {
                         if is_fg {
                             self.fg = color;
+                            self.fg_source = source;
                         } else {
                             self.bg = color;
+                            self.bg_source = source;
                         }
                     }
                 }
@@ -687,6 +715,36 @@ impl Screen {
 
     fn indexed_color(&self, index: u8) -> u32 {
         self.palette.indexed(index)
+    }
+
+    /// Re-evaluate only palette-based cells after OSC color changes. Direct
+    /// RGB colors and decorations are unaffected. Keep saved screens/history
+    /// consistent so switching alternate screen cannot resurrect stale colors.
+    fn refresh_palette(&mut self) {
+        fn refresh_cell(cell: &mut Cell, palette: &Palette) {
+            cell.fg = palette.resolve(cell.fg_source, cell.fg);
+            cell.bg = palette.resolve(cell.bg_source, cell.bg);
+        }
+        let palette = &self.palette;
+        for row in &mut self.grid {
+            for cell in row { refresh_cell(cell, palette); }
+        }
+        for row in &mut self.history {
+            for cell in row { refresh_cell(cell, palette); }
+        }
+        if let Some(saved) = self.alternate.as_mut() {
+            for row in &mut saved.grid {
+                for cell in row { refresh_cell(cell, palette); }
+            }
+        }
+        self.fg = palette.resolve(self.fg_source, self.fg);
+        self.bg = palette.resolve(self.bg_source, self.bg);
+        self.saved_cursor.fg = palette.resolve(self.saved_cursor.fg_source, self.saved_cursor.fg);
+        self.saved_cursor.bg = palette.resolve(self.saved_cursor.bg_source, self.saved_cursor.bg);
+        if let Some(saved) = &mut self.saved_primary_cursor {
+            saved.fg = palette.resolve(saved.fg_source, saved.fg);
+            saved.bg = palette.resolve(saved.bg_source, saved.bg);
+        }
     }
 
     fn set_alternate(&mut self, enable: bool) {
@@ -802,6 +860,8 @@ impl Screen {
         self.style = TextStyle::default();
         self.fg = self.palette.foreground;
         self.bg = self.palette.background;
+        self.fg_source = ColorSource::DefaultForeground;
+        self.bg_source = ColorSource::DefaultBackground;
         self.scroll_top = 0;
         self.scroll_bottom = self.rows;
         self.wrap_pending = false;
