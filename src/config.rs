@@ -151,6 +151,19 @@ mod tests {
     }
 
     #[test]
+    fn osc52_write_is_denied_by_default_and_partial_overrides_keep_it_disabled() {
+        let mut defaults: toml::Value =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let base: Config = defaults.clone().try_into().unwrap();
+        assert!(!base.clipboard.osc52_write);
+        let overrides: toml::Value =
+            toml::from_str("[clipboard]\ncopy_on_select = true").unwrap();
+        merge(&mut defaults, overrides);
+        let merged: Config = defaults.try_into().unwrap();
+        assert!(!merged.clipboard.osc52_write);
+        assert!(merged.clipboard.copy_on_select);
+    }
+    #[test]
     fn partial_configuration_inherits_defaults() {
         let mut defaults: toml::Value =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
