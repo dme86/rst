@@ -107,8 +107,8 @@ rst's in-terminal **Links** palette. It extracts HTTP/HTTPS URLs from the
 last **20 completed command outputs** (plus the current running command),
 deduplicates them, and lists the newest matches first. Browse using
 **j/k**, **Up/Down**, **PageUp/PageDown** or **Home/End**. Press **Enter**
-to open the selected URL in your OS default browser (macOS \`open\`,
-Wayland \`xdg-open\`), or **Esc** to close without opening anything.
+to open the selected URL in your OS default browser (macOS `open`,
+Wayland `xdg-open`), or **Esc** to close without opening anything.
 You can also move through the list with the mouse wheel.
 
 No URLs open automatically, and rst never feeds palette keys to the shell.
@@ -120,20 +120,20 @@ The URL history is deliberately compact and memory-bounded: rst keeps up
 to 64 distinct URLs per command and shows up to 256 recent unique URLs
 in the picker, without retaining 20 copies of the command logs. Older
 commands are evicted as new OSC 133 outputs complete. URLs from an
-individual command that exceeded \`[command_output].max_megabytes\` are
+individual command that exceeded `[command_output].max_megabytes` are
 not indexed (the existing copy safety limit still applies). Links in
 an actively running command are available before it completes.
 
-Change the history depth in \`~/.config/rst/config.toml\`:
+Change the history depth in `~/.config/rst/config.toml`:
 
-\`\`\`toml
+```toml
 [url_picker]
 recent_outputs = 20 # 1..100
-\`\`\`
+```
 
 As with copying the last output, **OSC 133 shell integration is required**.
-Install it using \`make shell-integration\` or
-\`rst --install-shell-integration\`, and launch a new shell. The picker
+Install it using `make shell-integration` or
+`rst --install-shell-integration`, and launch a new shell. The picker
 is session-local; URL history is not written to disk.
 
 ### Default colors
