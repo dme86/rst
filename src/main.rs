@@ -30,7 +30,7 @@ use crate::{
     attention::{BellLimiter, FocusTracker, VISUAL_BELL_DURATION},
     config::Config,
     keyboard::{encode_key, KeyboardModes},
-    ime::{self, ImeState},
+    ime::ImeState,
     mouse::MouseReporter,
     pty::{PtySession, UserEvent},
     render::Renderer,
