@@ -64,26 +64,33 @@ bundled defaults. Set `[window] padding = 6` there to adopt the new spacing;
 use `0` if you prefer no inset. This affects the terminal's content area,
 not macOS window decorations.
 
-### Cursor blink
+### Cursor shape and blinking (DECSCUSR)
 
-The default block cursor blinks continuously with 700 ms visible / 700 ms
-hidden, using a deadline-based event-loop timer rather than continuous
-redraws. Typing immediately restores the cursor and restarts its timer.
-Applications can still hide the cursor using the standard terminal escape
-sequence.
+rst supports **block, underline, and bar** cursor shapes on macOS and Wayland.
+The default is a blinking block with a 700 ms interval. Choose a different
+default in `~/.config/rst/config.toml`:
 
 ```toml
-[window]
-padding = 6
-
 [cursor]
-style = "block"
+style = "bar" # "block", "underline", or "bar"
 blink = true
 blink_interval_ms = 700
 ```
 
-Set `blink = false` to keep the cursor steady, or adjust
-`blink_interval_ms` between 100 and 3000.
+Programs such as Neovim can override both the shape and blink behavior using
+`DECSCUSR` (`CSI Ps SP q`). The space before `q` is required:
+
+| Ps | Cursor |
+| --- | --- |
+| 0 (or omitted) | Restore your configured cursor default |
+| 1 / 2 | Blinking / steady block |
+| 3 / 4 | Blinking / steady underline |
+| 5 / 6 | Blinking / steady vertical bar |
+
+For a quick manual check, use `printf '\\033[5 q'` (blinking bar) and
+`printf '\\033[0 q'` (restore your default). With a steady cursor the
+event loop does not schedule cursor-blink frames. Text blinking is independent.
+`CSI ? 25 l` still hides the cursor regardless of its shape.
 
 ### VT/DEC modes (compatibility milestone)
 
