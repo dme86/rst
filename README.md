@@ -165,20 +165,28 @@ accent = "#83a598"
 unread = "#b8bb26"
 ```
 
-**Smart tab names:** With `name_mode = "smart"`, a running command
-appears by its executable name (for example `k9s`, `nvim`, `htop`).
-When an executable hint is unavailable, rst also uses a running
-application's OSC window title (for example fish's `k9s ~` title is
-displayed as `k9s`). Once the command exits, the tab shows the working
-directory. Paths under your home
+**Smart tab names:** With `name_mode = "smart"`, rst first
+queries the **actual foreground process group** of each active PTY, then
+resolves its real executable name using macOS `libproc` or Linux
+`/proc/<pid>/comm`. For example, with a fish alias `vim -> nvim`, the
+tab now displays **`nvim`**, not the typed alias `vim`. The same applies
+to `k9s`, `htop` and other directly started applications.
+
+If the OS lookup is unavailable, the original OSC 133 executable hint
+and running application's OSC window title remain as fallbacks (for
+example fish's `k9s ~` title is displayed as `k9s`). Once the command
+exits, the tab shows the working directory. Paths under your home
 folder are shortened to `~`; if the path is too long for the tab, rst shows
 its final folder name instead. If no metadata is available, it falls back
 to the normal OSC window title and finally the shell name.
 
 Modes: `directory` always prefers the current directory; `title`
 uses the OSC window title; `shell` shows a fixed shell label. Tab names
-are independent per tab, including background sessions. No OS process
-polling or periodically running command is used.
+are independent per tab, including background sessions. Foreground
+process names are checked **at most twice per second** while commands
+or full-screen TUIs run, never for idle tabs or when tabs are disabled.
+The lookup uses a PTY ioctl and a direct OS API (no subprocess or global
+process scan); it only repaints when the label changes.
 
 **Refresh the shell integration once after updating** to enable automatic
 working-directory and executable detection:
@@ -189,11 +197,13 @@ rst --install-shell-integration
 
 Open a new rst window afterwards. The bundled fish, zsh and bash hooks
 emit OSC 7 cwd updates at the prompt and a short OSC 133 executable hint
-when a command starts. Commands run through complex wrappers such as
-`sudo`, `env`, pipelines or an existing tmux session may show the wrapper
-or the OSC title instead of the inner executable; changing directories and
-simple direct commands work without such inference. OSC titles from
-terminal applications remain supported.
+when a command starts. The native foreground-process lookup works
+without reinstalling shell hooks; refresh them only if you want OSC 7
+directory and OSC 133 fallback metadata. For pipelines, process groups
+typically identify the **first job**; tmux, scripts, wrappers and programs
+that spawn their own descendants can show the group leader rather than
+the deepest nested program. OSC titles from terminal applications remain
+supported.
 
 These are **Gruvbox-inspired, independently editable** default colors.
 No extra palette dependency is required. The bar occupies exactly one
