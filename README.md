@@ -182,6 +182,37 @@ All operations have PTY-byte-stream regression tests in
 not a claim of complete VT500 emulation; advanced DCS and left/right margins
 are still out of scope.
 
+### OSC: titles, dynamic colors, clipboard
+
+rst now supports st-compatible OSC commands with BEL and ST (ESC backslash)
+terminators, including split PTY reads:
+
+- **OSC 0/1/2:** Window and icon titles. OSC 0 sets both, 1 sets the icon
+  title and 2 sets the native window title. Empty titles reset to the default.
+- **OSC 4/104:** Change/query and selectively or globally reset all 256
+  palette entries. Multiple index/color pairs are supported.
+- **OSC 10/11/12:** Change or query default foreground, background and cursor
+  colors. **OSC 110/111/112** resets each to its configured initial value.
+- Queries (`?`) return xterm's 16-bit RGB response format.
+- Colors accept #RGB, #RRGGBB, #RRRGGGBBB, #RRRRGGGGBBBB and rgb:R/G/B.
+  X11 named color strings are not supported across macOS and Wayland.
+- Existing indexed and default-colored cells in the screen, scrollback and
+  saved alternate screen are recolored; explicit RGB cells stay unchanged.
+
+**OSC 52** clipboard *writes* are implemented, but **disabled by default**.
+Enable only for trusted shells by adding this configuration:
+
+```toml
+[clipboard]
+osc52_write = true
+```
+
+The existing `clipboard.enabled = false` also prevents OSC 52 writes.
+OSC 52 clipboard *reads* are never supported. Writes are limited to valid
+UTF-8 of at most 64 KiB, and the queue is bounded. A remote shell can
+overwrite your host clipboard if this option is enabled.
+Protocol tests: `src/osc_tests.rs` and `src/osc.rs`.
+
 ### Mouse reporting
 
 rst implements upstream st's legacy X10 (CSI ? 9 h), button tracking
