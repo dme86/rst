@@ -1363,8 +1363,8 @@ impl ApplicationHandler<UserEvent> for App {
                         if !replies.is_empty() { tab.pty.write(&replies); }
                         // Do not allow a hidden tab to steal the clipboard
                         // or trigger audio/visual bell on the active tab.
-                        tab.terminal.screen.take_clipboard_writes();
-                        tab.terminal.screen.take_bells();
+                        let _ = tab.terminal.screen.take_clipboard_writes();
+                        let _ = tab.terminal.screen.take_bells();
                         if !tab.unread {
                             tab.unread = true;
                             became_unread = true;
