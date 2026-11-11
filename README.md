@@ -118,7 +118,7 @@ OSC 7 metadata provides an existing local directory.
 | Focus with the mouse | **Click inside the pane** | Same |
 
 **Full pane view:** Press the F shortcut to expand the focused pane into the
-terminal area, with the others reduced to faint, unlabelled edges on the right (3 physical pixels per pane).
+terminal area, with the others reduced to faint, unlabelled accordion folds on the right (3 physical pixels per pane).
 Press the same shortcut again to return to the exact
 split tree. The OS window itself does not enter fullscreen. Click a collapsed
 edge (or use the directional focus shortcuts) to bring it forward while staying

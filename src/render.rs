@@ -712,17 +712,33 @@ impl Renderer {
         }
     }
 
-    /// Barely visible stacked edges, without labels, glyph work or animation.
+    /// Barely visible accordion folds, without labels, glyph work or animation.
     pub fn draw_collapsed_panes(
         &mut self, pixels: &mut [u32], width: usize, height: usize, screen: &Screen,
         rail: crate::panes::Rect, items: &[(crate::panes::Rect, bool)],
     ) {
         rect(pixels, width, height, rail.x, rail.y, rail.width, rail.height, screen.palette.background);
-        for (area, unread) in items {
+        if width == 0 { return; }
+        let bottom = height.min(pixels.len() / width);
+        for (index, (area, unread)) in items.iter().enumerate() {
             if area.width == 0 { continue; }
-            let line = area.width.saturating_sub(1).max(1);
+            let amplitude = area.width - 1;
             let color = blend(screen.palette.background, screen.palette.foreground, if *unread { 32 } else { 20 });
-            rect(pixels, width, height, area.x + area.width - line, area.y, line, area.height, color);
+            let shade = blend(screen.palette.background, screen.palette.foreground, 8);
+            for y in area.y..area.y.saturating_add(area.height).min(bottom) {
+                // A one-pixel crease moves back and forth within the same
+                // three-pixel strip. Neighboring folds lean in opposite ways.
+                let phase = if amplitude == 0 { 0 } else { ((y - area.y) / 2) % (amplitude * 2) };
+                let offset = if phase <= amplitude { phase } else { amplitude * 2 - phase };
+                let offset = if index % 2 == 0 { offset } else { amplitude - offset };
+                let x = area.x.saturating_add(offset);
+                if x < width {
+                    pixels[y * width + x] = color;
+                    if x + 1 < area.x.saturating_add(area.width).min(width) {
+                        pixels[y * width + x + 1] = shade;
+                    }
+                }
+            }
         }
     }
 

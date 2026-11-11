@@ -279,6 +279,6 @@ pane. Clicks on collapsed edges are consumed locally. Existing selections/drag r
 still finish at the edge of the active pane.
 
 Collapsed panes now occupy only 3 physical pixels each, drawn as low-contrast
-stacked edges without labels or a Restore button. The F shortcut restores the
+zigzag accordion folds without labels or a Restore button. The F shortcut restores the
 layout, and an edge can still be clicked to select that pane. No text shaping
 or foreground-process polling is added for these hints when the tab bar is off.
