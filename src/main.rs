@@ -1341,7 +1341,33 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Output(bytes) => {
+            UserEvent::Output { tab_id, bytes } => {
+                if tab_id != self.active_tab_id {
+                    // Hidden tabs still parse their VT stream and answer
+                    // terminal queries, but NEVER request a redraw per chunk.
+                    let mut became_unread = false;
+                    if let Some(tab) = self.inactive_tabs.iter_mut()
+                        .find(|tab| tab.id == tab_id)
+                    {
+                        tab.terminal.advance(&bytes);
+                        let replies = tab.terminal.screen.take_replies();
+                        if !replies.is_empty() { tab.pty.write(&replies); }
+                        // Do not allow a hidden tab to steal the clipboard
+                        // or trigger audio/visual bell on the active tab.
+                        tab.terminal.screen.take_clipboard_writes();
+                        tab.terminal.screen.take_bells();
+                        if !tab.unread {
+                            tab.unread = true;
+                            became_unread = true;
+                        }
+                    }
+                    if became_unread {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 let previous_mouse_mode = self.terminal.screen.mouse_tracking;
                 let previous_alt_screen = self.terminal.screen.in_alternate_screen();
                 let previous_view_offset = self.terminal.screen.view_offset;
@@ -1399,9 +1425,35 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                 }
             }
-            UserEvent::Closed => event_loop.exit(),
+            UserEvent::Closed { tab_id } => {
+                if self.close_tab(tab_id, false) {
+                    event_loop.exit();
+                }
+            },
         }
     }
+}
+
+fn configured_terminal(config: &Config, cols: usize, rows: usize) -> Result<Terminal> {
+    let palette = Palette::try_from(&config.colors)?;
+    let mut terminal = Terminal::new(cols, rows, config.scrollback.lines, palette);
+    terminal.screen.osc52_write_allowed =
+        config.clipboard.enabled && config.clipboard.osc52_write;
+    terminal.screen.command_capture = CommandCapture::with_url_history(
+        config.command_output.max_megabytes.saturating_mul(1024 * 1024),
+        config.url_picker.recent_outputs,
+    );
+    let shape = match config.cursor.style.as_str() {
+        "block" => CursorShape::Block,
+        "underline" => CursorShape::Underline,
+        "bar" => CursorShape::Bar,
+        _ => unreachable!("validated cursor style"),
+    };
+    terminal.screen.set_default_cursor_style(CursorStyle {
+        shape,
+        blink: config.cursor.blink,
+    });
+    Ok(terminal)
 }
 
 fn main() -> Result<()> {
@@ -1418,40 +1470,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = config::load()?;
-    let palette = Palette::try_from(&config.colors)?;
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     // softbuffer's platform error holds non-Send raw window handles.
     // Convert it into an owned diagnostic before passing through anyhow.
     let context = Context::new(event_loop.owned_display_handle())
         .map_err(|err| anyhow::anyhow!("cannot initialize display: {err}"))?;
+    let proxy = event_loop.create_proxy();
     let pty = PtySession::start(
-        config.window.columns,
-        config.window.rows,
-        &config.terminal.term,
-        event_loop.create_proxy(),
+        1, config.window.columns, config.window.rows,
+        &config.terminal.term, proxy.clone(),
     )?;
-    let mut terminal = Terminal::new(
-        config.window.columns,
-        config.window.rows,
-        config.scrollback.lines,
-        palette,
-    );
-    terminal.screen.osc52_write_allowed = config.clipboard.enabled && config.clipboard.osc52_write;
-    terminal.screen.command_capture = CommandCapture::with_url_history(
-        config.command_output.max_megabytes.saturating_mul(1024 * 1024),
-        config.url_picker.recent_outputs,
-    );
-    let shape = match config.cursor.style.as_str() {
-        "block" => CursorShape::Block,
-        "underline" => CursorShape::Underline,
-        "bar" => CursorShape::Bar,
-        _ => unreachable!("validated cursor style"),
-    };
-    terminal.screen.set_default_cursor_style(CursorStyle {
-        shape,
-        blink: config.cursor.blink,
-    });
+    let terminal = configured_terminal(
+        &config, config.window.columns, config.window.rows,
+    )?;
     let original_font_size = config.font.size;
     let config_blink_ms = config.cursor.blink_interval_ms;
     let mut app = App {
@@ -1459,6 +1491,13 @@ fn main() -> Result<()> {
         original_font_size,
         terminal,
         pty,
+        active_tab_id: 1,
+        next_tab_id: 2,
+        tab_order: vec![1],
+        inactive_tabs: Vec::new(),
+        proxy,
+        shell_label: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+            .rsplit('/').next().unwrap_or("sh").to_string(),
         context,
         window: None,
         surface: None,
