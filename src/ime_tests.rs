@@ -59,7 +59,7 @@ fn keyboard_lock_discards_commit_and_clears_preedit() {
     let mut ime = ImeState::default();
     ime.handle(Ime::Enabled, false);
     ime.handle(Ime::Preedit("hello".into(), Some((5, 5))), true);
-    assert!(ime.composing());
+    assert!(!ime.composing());
     assert_eq!(ime.handle(Ime::Commit("hello".into()), true), None);
     assert!(!ime.composing());
 }
