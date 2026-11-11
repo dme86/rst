@@ -2260,6 +2260,31 @@ mod tests {
     }
 
     #[test]
+    fn copied_output_highlight_tracks_scrollback_viewport() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(16, 2, 4, palette);
+        term.advance(b"\x1b]133;C\x07first\r\nsecond\r\nthird\x1b]133;D\x07");
+        let (_, output_id) = term.screen.command_capture.latest_output_with_id().unwrap();
+        assert_eq!(term.screen.history[0][0].output_id, output_id);
+        term.screen.show_cursor = false;
+        term.screen.scroll_view(1);
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut before = vec![0u32; width * height];
+        renderer.draw(&mut before, width, height, &term.screen, None, None);
+        let mut highlighted = before.clone();
+        renderer.draw_output_copy_highlight(
+            &mut highlighted, width, height, &term.screen, output_id, 255,
+        );
+        assert_ne!(before, highlighted, "scrollback copies must be highlighted");
+        assert_eq!(term.screen.history[0][0].ch, 'f');
+        assert_eq!(term.screen.history[0][0].output_id, output_id);
+    }
+
+    #[test]
     fn copy_card_uses_fade_clock_and_does_not_modify_terminal_data() {
         let config: crate::config::Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
