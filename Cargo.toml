@@ -8,6 +8,7 @@ repository = "https://github.com/dme86/rst"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 fontdb = "0.24"
 fontdue = "0.9"
