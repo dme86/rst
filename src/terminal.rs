@@ -1075,13 +1075,15 @@ impl Screen {
             133 => {
                 // OSC 133;E;<program> provides a validated executable name.
                 // Existing A/B/C/D capture markers retain their semantics.
-                if params.get(1).copied() == Some(b"E") {
-                    if let Some(program) = params.get(2)
-                        .and_then(|value| tab_naming::program_from_osc133(value))
-                    {
-                        if self.foreground_program.as_deref() != Some(&program) {
-                            self.foreground_program = Some(program);
-                            self.tab_label_revision = self.tab_label_revision.wrapping_add(1);
+                if params.get(1).is_some_and(|part| *part == b"E") {
+                    // Require exactly one metadata parameter: no injected
+                    // semicolons or unexpected escape-sequence fragments.
+                    if params.len() == 3 {
+                        if let Some(program) = tab_naming::program_from_osc133(params[2]) {
+                            if self.foreground_program.as_deref() != Some(program.as_str()) {
+                                self.foreground_program = Some(program);
+                                self.tab_label_revision = self.tab_label_revision.wrapping_add(1);
+                            }
                         }
                     }
                 } else if let Some(marker) = params.get(1).and_then(|part| part.first()) {
