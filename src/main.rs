@@ -1,6 +1,7 @@
 mod config;
 mod keyboard;
 mod mouse;
+mod osc;
 mod pty;
 mod render;
 mod terminal;
