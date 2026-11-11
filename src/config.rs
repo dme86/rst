@@ -197,6 +197,24 @@ mod tests {
     }
 
     #[test]
+    fn ligatures_default_on_and_can_be_disabled_in_config() {
+        let config: Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert!(config.font.ligatures);
+        let mut value: toml::Value =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        value["font"]["ligatures"] = toml::Value::Boolean(false);
+        let disabled: Config = value.try_into().unwrap();
+        assert!(!disabled.font.ligatures);
+
+        let mut legacy: toml::Value =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        legacy["font"].as_table_mut().unwrap().remove("ligatures");
+        let legacy: Config = legacy.try_into().unwrap();
+        assert!(legacy.font.ligatures);
+    }
+
+    #[test]
     fn bundled_default_font_size_matches_alacritty() {
         let defaults: Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
