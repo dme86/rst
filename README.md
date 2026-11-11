@@ -100,6 +100,16 @@ copying a truncated command**. Only text is copied, never raw control
 sequences. Clipboard writes require `[clipboard].enabled = true` but do
 not require OSC 52 clipboard write permissions.
 
+### Robustness and performance checks
+
+`make stress` runs extended reproducible randomized tests, including resize,
+scrollback, malformed terminal input and 32 independent session states.
+`make benchmark` opens three self-closing test windows and measures startup,
+idle CPU, memory snapshots and PTY response latency under output load.
+`make benchmark-parser` measures parser throughput without a window.
+See [the measurement guide](docs/performance-testing.md) for workload details,
+profiling ordinary shell startup, and interpreting the results.
+
 ### Responsive input under load
 
 Each session sends keyboard input, pastes and terminal replies through an

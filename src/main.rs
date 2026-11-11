@@ -12,6 +12,7 @@ mod macos_icon;
 mod osc;
 mod pty;
 mod pty_input;
+mod profile;
 mod process_name;
 mod render;
 mod selection;
@@ -62,6 +63,7 @@ struct StoredTab {
 }
 
 struct App {
+    profile: Option<profile::Profile>,
     config: Config,
     original_font_size: f32,
     terminal: Terminal,
@@ -373,6 +375,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        let draw_started = self.profile.as_ref().map(|_| Instant::now());
         // Only materialize the tiny tab label list when the bar is enabled.
         let tab_items = if self.config.tabs.enabled {
             self.tab_displays()
@@ -472,6 +475,8 @@ impl App {
         window.pre_present_notify();
         if let Err(err) = buffer.present() {
             eprintln!("rst: present: {err}");
+        } else if let (Some(profile), Some(started)) = (&mut self.profile, draw_started) {
+            profile.frame(started, self.terminal.screen.prompt_seen);
         }
     }
 
@@ -979,6 +984,7 @@ fn blink_step(
 
 impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(profile) = &mut self.profile { profile.wait(); }
         let now = Instant::now();
         let mut next_deadline: Option<Instant> = None;
 
@@ -1416,6 +1422,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Output { tab_id, bytes } => {
+                if let Some(profile) = &mut self.profile { profile.output(bytes.len(), bytes.queued_at); }
                 if tab_id != self.active_tab_id {
                     // Hidden tabs still parse their VT stream and answer
                     // terminal queries, but NEVER request a redraw per chunk.
@@ -1456,6 +1463,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let previous_title = self.terminal.screen.title.clone();
                 let previous_cursor_style = self.terminal.screen.cursor_style;
                 self.terminal.advance(&bytes);
+                if let Some(profile) = &mut self.profile { profile.prompt(self.terminal.screen.prompt_seen); }
                 if !Self::tab_may_have_foreground_job(&self.terminal.screen) {
                     let _ = self.pty.clear_foreground_name();
                 }
@@ -1550,6 +1558,7 @@ fn configured_terminal(config: &Config, cols: usize, rows: usize) -> Result<Term
 }
 
 fn main() -> Result<()> {
+    let process_started = Instant::now();
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("--install-shell-integration"))
     {
@@ -1562,6 +1571,7 @@ fn main() -> Result<()> {
         println!("rst: open a new rst window to activate shell integration");
         return Ok(());
     }
+    let profile = profile::Profile::from_env(process_started)?;
     let config = config::load()?;
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -1580,6 +1590,7 @@ fn main() -> Result<()> {
     let original_font_size = config.font.size;
     let config_blink_ms = config.cursor.blink_interval_ms;
     let mut app = App {
+        profile,
         config,
         original_font_size,
         terminal,

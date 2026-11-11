@@ -64,3 +64,13 @@ config: ## Copy example configuration (do not overwrite)
 	@mkdir -p "$(HOME)/.config/rst"
 	@test -e "$(HOME)/.config/rst/config.toml" || cp config/default.toml "$(HOME)/.config/rst/config.toml"
 	@echo "Config: $(HOME)/.config/rst/config.toml"
+
+.PHONY: stress benchmark benchmark-parser
+stress: ## Run extended deterministic robustness tests (512,000 random operations)
+	RST_STRESS_SEEDS=256 RST_STRESS_STEPS=2000 $(CARGO) test --release robustness_tests
+
+benchmark: release ## Measure real-window startup, idle CPU and PTY latency (Python 3)
+	python3 scripts/benchmark.py
+
+benchmark-parser: ## Measure parser throughput without a window
+	$(CARGO) test --release parser_throughput_benchmark -- --ignored --nocapture

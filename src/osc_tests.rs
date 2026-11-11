@@ -288,3 +288,15 @@ fn maximum_supported_clipboard_survives_fixed_parser_buffer() {
     t.advance(b"\x1b\\");
     assert_eq!(t.screen.take_clipboard_writes(), vec![text]);
 }
+
+#[test]
+fn prompt_readiness_requires_a_completed_osc_marker() {
+    let mut t = terminal();
+    t.advance(b"ordinary prompt> ");
+    assert!(!t.screen.prompt_seen);
+    t.advance(b"\x1b]133;A\x07prompt> \x1b]133;");
+    t.advance(b"B");
+    assert!(!t.screen.prompt_seen, "an incomplete OSC is not a ready prompt");
+    t.advance(b"\x07");
+    assert!(t.screen.prompt_seen);
+}

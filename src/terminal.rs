@@ -247,6 +247,8 @@ pub struct Screen {
     pub mouse_sgr: bool,
     pub bracketed_paste: bool,
     pub focus_reporting: bool,
+    /// At least one OSC 133 B (prompt complete) marker was received.
+    pub prompt_seen: bool,
     pub keyboard_lock: bool,
     pub reverse_video: bool,
     pub origin_mode: bool,
@@ -336,6 +338,7 @@ impl Screen {
             mouse_sgr: false,
             bracketed_paste: false,
             focus_reporting: false,
+            prompt_seen: false,
             keyboard_lock: false,
             reverse_video: false,
             origin_mode: false,
@@ -776,7 +779,10 @@ impl Screen {
                     row.fill(blank);
                 }
             }
-            3 => self.history.clear(),
+            3 => {
+                self.history.clear();
+                self.view_offset = 0;
+            }
             1 => {
                 let blank = self.blank();
                 for row in &mut self.grid[..self.y] {
@@ -1095,6 +1101,7 @@ impl Screen {
                     if matches!(*marker, b'A' | b'D') && self.foreground_program.take().is_some() {
                         self.tab_label_revision = self.tab_label_revision.wrapping_add(1);
                     }
+                    if *marker == b'B' { self.prompt_seen = true; }
                     self.command_capture.marker(*marker);
                 }
             },
@@ -1833,3 +1840,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "robustness_tests.rs"]
+mod robustness_tests;

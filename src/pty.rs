@@ -26,6 +26,7 @@ const OUTPUT_QUEUE_CHUNKS: usize = 128;
 #[derive(Debug)]
 pub struct OutputChunk {
     bytes: Vec<u8>,
+    pub queued_at: Option<std::time::Instant>,
     credit: SyncSender<()>,
 }
 
@@ -88,6 +89,7 @@ impl PtySession {
             move |message| { let _ = input_proxy.send_event(UserEvent::InputError { tab_id, message }); },
         )?;
         let session_proxy = proxy.clone();
+        let profiling = std::env::var_os("RST_PROFILE").is_some();
 
         let (credit, available) = mpsc::sync_channel(OUTPUT_QUEUE_CHUNKS);
         for _ in 0..OUTPUT_QUEUE_CHUNKS {
@@ -103,7 +105,7 @@ impl PtySession {
                         Ok(n) => {
                             if proxy.send_event(UserEvent::Output {
                                 tab_id,
-                                bytes: OutputChunk { bytes: buffer[..n].to_vec(), credit: credit.clone() },
+                                bytes: OutputChunk { bytes: buffer[..n].to_vec(), queued_at: profiling.then(std::time::Instant::now), credit: credit.clone() },
                             }).is_err() {
                                 break;
                             }
@@ -193,7 +195,7 @@ mod tests {
         let (credit, available) = mpsc::sync_channel(1);
         credit.send(()).unwrap();
         available.recv().unwrap();
-        let chunk = OutputChunk { bytes: b"output".to_vec(), credit };
+        let chunk = OutputChunk { bytes: b"output".to_vec(), queued_at: None, credit };
         assert_eq!(&*chunk, b"output");
         assert!(matches!(available.try_recv(), Err(mpsc::TryRecvError::Empty)));
         drop(chunk);
@@ -204,6 +206,6 @@ mod tests {
     fn dropping_output_after_reader_exits_does_not_block() {
         let (credit, available) = mpsc::sync_channel(1);
         drop(available);
-        drop(OutputChunk { bytes: vec![], credit });
+        drop(OutputChunk { bytes: vec![], queued_at: None, credit });
     }
 }

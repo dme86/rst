@@ -79,3 +79,12 @@ blocked until the child/PTY closes; it cannot stall the GUI.
 Deterministic regression tests simulate a blocked child and short writes,
 verify exact byte ordering and paste framing, exercise both queue limits,
 and check error reporting and cancellation without joining a blocked worker.
+
+## Follow-up: automated robustness and runtime measurement
+
+The new [testing guide](performance-testing.md) describes extended randomized
+checks, a 32-session model workload, the fixed scrollback-clear crash and
+reproducible real-window startup/idle/load benchmarks. The earlier limitations
+above describe the original review; native macOS runtime measurements are now
+available in that guide. Wayland execution and coverage-guided fuzzing remain
+unverified.
