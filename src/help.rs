@@ -7,6 +7,9 @@ pub fn lines(macos: bool) -> Vec<String> {
     let copy_key = if macos { "Cmd+Shift+O" } else { "Ctrl+Shift+O" };
     let links_key = if macos { "Cmd+Shift+U" } else { "Ctrl+Shift+U" };
     let help_key = if macos { "Cmd+Shift+H" } else { "Ctrl+Shift+H" };
+    let new_tab = if macos { "Cmd+T" } else { "Ctrl+Shift+T" };
+    let close_tab = if macos { "Cmd+W" } else { "Ctrl+Shift+W" };
+    let direct_tab = if macos { "Cmd+1..9" } else { "Alt+1..9" };
     let zoom = if macos { "Cmd" } else { "Ctrl" };
     vec![
         "KEYBOARD SHORTCUTS".into(),
@@ -17,6 +20,13 @@ pub fn lines(macos: bool) -> Vec<String> {
         "  Link palette: j/k, arrows; Enter opens; Esc closes".into(),
         format!("  Copy selected text            {primary}+C"),
         format!("  Paste from clipboard          {primary}+V"),
+        "".into(),
+        "Tabs (enable with [tabs] enabled = true)".into(),
+        format!("  New tab                        {new_tab}"),
+        format!("  Close tab                      {close_tab}"),
+        "  Next / previous tab            Ctrl+Tab / Ctrl+Shift+Tab".into(),
+        format!("  Switch directly                {direct_tab}"),
+        "  Mouse                          Click tab / + / ×".into(),
         "".into(),
         "Navigation & display".into(),
         "  Scroll through history        Shift+PgUp/PgDn".into(),
@@ -59,6 +69,7 @@ mod tests {
             assert!(text.contains(if macos { "Cmd+Shift+U" } else { "Ctrl+Shift+U" }));
             assert!(text.contains("rst --install-shell-integration"));
             assert!(text.contains("F1"));
+            assert!(text.contains(if macos { "Cmd+T" } else { "Ctrl+Shift+T" }));
             assert!(text.contains("Alt/Option"));
         }
     }

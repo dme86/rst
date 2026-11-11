@@ -7,12 +7,13 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    config::FontConfig,
+    config::{FontConfig, TabsConfig},
     copy_feedback::{CopyNotice, NoticeKind},
     ime::{self, Preedit},
     help,
     shaping::{self, FontBytes, ShapedText},
     terminal::{Cell, CursorShape, Screen, TextStyle},
+    tabs::{self, BarLayout, TabDisplay},
     selection::Selection,
     url_picker::{self, UrlPicker},
 };
@@ -555,6 +556,88 @@ impl Renderer {
         }
         if let Some(preedit) = preedit {
             self.draw_preedit(pixels, width, height, screen, preedit);
+        }
+    }
+
+    /// Paint one optional tab row, reusing the terminal's own rasterizer.
+    /// No allocations beyond the tiny active tab snapshot passed in by App.
+    /// This never modifies the underlying PTY or screen grids.
+    pub fn draw_tab_bar(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        screen: &Screen,
+        items: &[TabDisplay],
+        active_index: usize,
+        config: &TabsConfig,
+    ) {
+        if !config.enabled || width == 0 || height == 0
+            || self.cell_width == 0 || self.cell_height == 0
+        {
+            return;
+        }
+        let bar_h = tabs::bar_height(self.cell_height, true).min(height);
+        let top = if config.position == "bottom" {
+            height.saturating_sub(bar_h)
+        } else {
+            0
+        };
+        let color = |text: &str| tabs::parse_color(text).unwrap_or(0x282828);
+        let background = color(&config.colors.background);
+        let inactive_background = color(&config.colors.inactive_background);
+        let foreground = color(&config.colors.foreground);
+        let active_background = color(&config.colors.active_background);
+        let active_foreground = color(&config.colors.active_foreground);
+        let accent = color(&config.colors.accent);
+        let unread = color(&config.colors.unread);
+        rect(pixels, width, height, 0, top, width, bar_h, background);
+        if config.position == "bottom" {
+            rect(pixels, width, height, 0, top, width, 1.min(bar_h), accent);
+        } else {
+            rect(pixels, width, height, 0,
+                 top + bar_h.saturating_sub(1), width, 1.min(bar_h), accent);
+        }
+
+        let layout = BarLayout::for_width(items.len(), active_index, screen.cols);
+        for (slot, index) in (layout.first..layout.first + layout.count).enumerate() {
+            let item = &items[index];
+            let x = self.padding.saturating_add(
+                (1 + slot * layout.slot_columns).saturating_mul(self.cell_width),
+            );
+            let w = layout.slot_columns.saturating_mul(self.cell_width).saturating_sub(2);
+            if x >= width { break; }
+            let bg = if item.active { active_background } else { inactive_background };
+            let ink = if item.active { active_foreground } else { foreground };
+            rect(pixels, width, height, x, top.saturating_add(3),
+                 w.min(width - x), bar_h.saturating_sub(5), bg);
+            if item.unread {
+                rect(pixels, width, height, x,
+                     top.saturating_add(3), 3.min(w), bar_h.saturating_sub(5), unread);
+            }
+            let available = layout.slot_columns.saturating_sub(
+                if config.close_buttons && layout.slot_columns >= 7 { 5 } else { 2 }
+            );
+            let title = if item.title.is_empty() { "shell" } else { &item.title };
+            let label = format!("{} {}", index + 1, title);
+            self.draw_ui_text(
+                pixels, width, height,
+                x.saturating_add(self.cell_width), top.saturating_add(3),
+                &label, ink, available, screen,
+            );
+            if config.close_buttons && layout.slot_columns >= 7 {
+                let close_x = x.saturating_add(
+                    (layout.slot_columns - 2).saturating_mul(self.cell_width),
+                );
+                self.draw_ui_text(pixels, width, height,
+                    close_x, top.saturating_add(3), "×", ink, 1, screen);
+            }
+        }
+        let plus_column = 1 + layout.count * layout.slot_columns;
+        if plus_column + 1 < screen.cols {
+            let plus_x = self.padding.saturating_add(plus_column * self.cell_width);
+            self.draw_ui_text(pixels, width, height,
+                plus_x, top.saturating_add(3), "+", accent, 1, screen);
         }
     }
 
@@ -2365,6 +2448,44 @@ mod tests {
         assert!(pixels.iter().any(|&pixel| pixel == term.screen.palette.selection));
     }
 
+
+    #[test]
+    fn optional_gruvbox_bar_is_drawn_outside_terminal_cells() {
+        let mut config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(40, 4, 0, palette);
+        term.advance(b"shell output");
+        let width = term.screen.cols * renderer.cell_width;
+        let bar_h = crate::tabs::bar_height(renderer.cell_height, true);
+        let height = term.screen.rows * renderer.cell_height + bar_h;
+        let items = vec![
+            crate::tabs::TabDisplay {
+                title: "fish".into(), active: true, unread: false,
+            },
+            crate::tabs::TabDisplay {
+                title: "logs".into(), active: false, unread: true,
+            },
+        ];
+        let mut pixels = vec![0xdeadbeefu32; width * height];
+        let original = pixels.clone();
+        renderer.draw_tab_bar(&mut pixels, width, height, &term.screen, &items, 0, &config.tabs);
+        assert_eq!(pixels, original, "disabled bar should not paint anything");
+        config.tabs.enabled = true;
+        renderer.draw_tab_bar(&mut pixels, width, height, &term.screen, &items, 0, &config.tabs);
+        assert_ne!(pixels, original);
+        assert_eq!(pixels[0], crate::tabs::parse_color("#282828").unwrap());
+        assert_eq!(term.screen.grid[0][0].ch, 's');
+        assert_eq!(term.screen.history.len(), 0);
+
+        config.tabs.position = "bottom".into();
+        let mut bottom = original.clone();
+        renderer.draw_tab_bar(&mut bottom, width, height, &term.screen, &items, 1, &config.tabs);
+        assert_eq!(bottom[0], original[0], "bottom bar must not paint the top row");
+        assert_eq!(bottom[(height - 1) * width],
+                   crate::tabs::parse_color("#282828").unwrap());
+    }
 
     #[test]
     fn help_popup_draws_over_pixels_without_mutating_terminal_cells() {

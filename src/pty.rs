@@ -9,8 +9,8 @@ use winit::event_loop::EventLoopProxy;
 
 #[derive(Debug)]
 pub enum UserEvent {
-    Output(Vec<u8>),
-    Closed,
+    Output { tab_id: u64, bytes: Vec<u8> },
+    Closed { tab_id: u64 },
 }
 
 pub struct PtySession {
@@ -21,6 +21,7 @@ pub struct PtySession {
 
 impl PtySession {
     pub fn start(
+        tab_id: u64,
         cols: usize,
         rows: usize,
         term: &str,
@@ -50,14 +51,17 @@ impl PtySession {
         let writer = pair.master.take_writer()?;
 
         thread::Builder::new()
-            .name("rst-pty-reader".into())
+            .name(format!("rst-pty-reader-{tab_id}"))
             .spawn(move || {
                 let mut buffer = [0u8; 8192];
                 loop {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(n) => {
-                            if proxy.send_event(UserEvent::Output(buffer[..n].to_vec())).is_err() {
+                            if proxy.send_event(UserEvent::Output {
+                                tab_id,
+                                bytes: buffer[..n].to_vec(),
+                            }).is_err() {
                                 break;
                             }
                         }
@@ -65,7 +69,7 @@ impl PtySession {
                         Err(_) => break,
                     }
                 }
-                let _ = proxy.send_event(UserEvent::Closed);
+                let _ = proxy.send_event(UserEvent::Closed { tab_id });
             })?;
 
         Ok(Self {
@@ -73,6 +77,12 @@ impl PtySession {
             writer,
             _child: child,
         })
+    }
+
+    pub fn terminate(&mut self) {
+        if let Err(err) = self._child.kill() {
+            eprintln!("rst: close shell: {err}");
+        }
     }
 
     pub fn write(&mut self, data: &[u8]) {

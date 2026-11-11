@@ -48,6 +48,23 @@ max_megabytes = 32
 # Only extracted links are retained for older commands, not full logs.
 recent_outputs = 20
 
+[tabs]
+# Disabled by default: when off, rst behaves exactly like a single-session terminal.
+enabled = false
+position = "top"         # "top" or "bottom"
+max_tabs = 10            # 1..32
+close_buttons = true
+
+[tabs.colors]
+# Gruvbox-inspired theme, independently configurable from terminal colors.
+background = "#282828"
+foreground = "#a89984"
+inactive_background = "#3c3836"
+active_background = "#fabd2f"
+active_foreground = "#282828"
+accent = "#83a598"
+unread = "#b8bb26"
+
 [clipboard]
 enabled = true
 copy_on_select = false

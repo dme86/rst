@@ -17,6 +17,7 @@ mod shell_integration;
 mod shaping;
 mod terminal;
 mod url_picker;
+mod tabs;
 
 use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};
 
@@ -26,7 +27,7 @@ use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{UserAttentionType, Window, WindowId},
 };
@@ -48,11 +49,26 @@ use crate::{
     url_picker::UrlPicker,
 };
 
+/// A hidden session keeps its own PTY and complete VT state. Only the
+/// foreground session is rendered, and only it runs cursor/text blink clocks.
+struct StoredTab {
+    id: u64,
+    terminal: Terminal,
+    pty: PtySession,
+    unread: bool,
+}
+
 struct App {
     config: Config,
     original_font_size: f32,
     terminal: Terminal,
     pty: PtySession,
+    active_tab_id: u64,
+    next_tab_id: u64,
+    tab_order: Vec<u64>,
+    inactive_tabs: Vec<StoredTab>,
+    proxy: EventLoopProxy<UserEvent>,
+    shell_label: String,
     context: Context<OwnedDisplayHandle>,
     window: Option<Arc<Window>>,
     surface: Option<Surface<OwnedDisplayHandle, Arc<Window>>>,
@@ -77,6 +93,182 @@ struct App {
 }
 
 impl App {
+    fn active_tab_index(&self) -> usize {
+        self.tab_order.iter().position(|id| *id == self.active_tab_id).unwrap_or(0)
+    }
+
+    fn tab_displays(&self) -> Vec<tabs::TabDisplay> {
+        self.tab_order.iter().map(|id| {
+            let (title, unread) = if *id == self.active_tab_id {
+                (&self.terminal.screen.title, false)
+            } else {
+                let tab = self.inactive_tabs.iter().find(|tab| tab.id == *id)
+                    .expect("all inactive IDs remain stored");
+                (&tab.terminal.screen.title, tab.unread)
+            };
+            let display = if title == terminal::DEFAULT_TITLE || title.is_empty() {
+                self.shell_label.clone()
+            } else {
+                title.chars().take(50).collect()
+            };
+            tabs::TabDisplay {
+                title: display,
+                active: *id == self.active_tab_id,
+                unread,
+            }
+        }).collect()
+    }
+
+    /// The tab bar lives outside the terminal VT grid, not in scrollback.
+    fn mouse_in_bar(&self) -> bool {
+        if !self.config.tabs.enabled { return false; }
+        let (Some(renderer), Some(window)) = (&self.renderer, &self.window) else {
+            return false;
+        };
+        let height = window.inner_size().height as usize;
+        let bar_h = tabs::bar_height(renderer.cell_height, true).min(height);
+        let top = if self.config.tabs.position == "bottom" {
+            height.saturating_sub(bar_h)
+        } else { 0 };
+        let y = self.mouse.1.max(0.0) as usize;
+        y >= top && y < top.saturating_add(bar_h)
+    }
+
+    fn tab_bar_action(&self) -> Option<tabs::TabAction> {
+        if !self.mouse_in_bar() { return None; }
+        let renderer = self.renderer.as_ref()?;
+        let col = (self.mouse.0.max(0.0) as usize)
+            .saturating_sub(renderer.padding) / renderer.cell_width.max(1);
+        let layout = tabs::BarLayout::for_width(
+            self.tab_order.len(), self.active_tab_index(), self.terminal.screen.cols,
+        );
+        layout.hit_test(col, self.terminal.screen.cols, self.config.tabs.close_buttons)
+    }
+
+    fn clear_tab_interaction(&mut self) {
+        self.selection = None;
+        self.selecting = false;
+        self.clicks.reset();
+        self.mouse_reporter.reset();
+        self.ime.clear();
+        self.help_open = false;
+        self.url_picker = None;
+        self.toast = None;
+        self.next_toast_frame = None;
+        self.bell_flash_until = None;
+        self.next_cursor_blink =
+            Instant::now() + Duration::from_millis(self.config.cursor.blink_interval_ms);
+        self.next_text_blink = Instant::now() + Duration::from_millis(800);
+        self.terminal.screen.cursor_blink_on = true;
+        self.terminal.screen.text_blink_on = true;
+        if let Some(window) = &self.window {
+            window.set_title(&self.terminal.screen.title);
+            window.request_redraw();
+        }
+        self.update_ime_cursor_area();
+    }
+
+    fn switch_tab(&mut self, target_id: u64) {
+        if !self.config.tabs.enabled || target_id == self.active_tab_id {
+            return;
+        }
+        let Some(tab) = self.inactive_tabs.iter_mut().find(|tab| tab.id == target_id) else {
+            return;
+        };
+        if self.focus.is_focused() && self.terminal.screen.focus_reporting {
+            self.pty.write(b"\x1b[O");
+        }
+        std::mem::swap(&mut self.terminal, &mut tab.terminal);
+        std::mem::swap(&mut self.pty, &mut tab.pty);
+        std::mem::swap(&mut self.active_tab_id, &mut tab.id);
+        tab.unread = false;
+        if self.focus.is_focused() && self.terminal.screen.focus_reporting {
+            self.pty.write(b"\x1b[I");
+        }
+        self.clear_tab_interaction();
+    }
+
+    fn switch_relative_tab(&mut self, step: isize) {
+        if !self.config.tabs.enabled { return; }
+        if let Some(next) = tabs::relative_tab(&self.tab_order, self.active_tab_id, step) {
+            self.switch_tab(next);
+        }
+    }
+
+    fn new_tab(&mut self) {
+        if !self.config.tabs.enabled { return; }
+        if self.tab_order.len() >= self.config.tabs.max_tabs {
+            self.notify(format!("Maximum of {} tabs reached", self.config.tabs.max_tabs));
+            return;
+        }
+        let new_id = self.next_tab_id;
+        let cols = self.terminal.screen.cols;
+        let rows = self.terminal.screen.rows;
+        let next_terminal = match configured_terminal(&self.config, cols, rows) {
+            Ok(terminal) => terminal,
+            Err(err) => {
+                self.notify(format!("Cannot initialize tab: {err}"));
+                return;
+            }
+        };
+        let mut next_pty = match PtySession::start(
+            new_id, cols, rows, &self.config.terminal.term, self.proxy.clone(),
+        ) {
+            Ok(pty) => pty,
+            Err(err) => {
+                self.notify(format!("Cannot start shell: {err}"));
+                return;
+            }
+        };
+        if let Some(renderer) = &self.renderer {
+            next_pty.resize(cols, rows, renderer.cell_width, renderer.cell_height);
+        }
+        let previous = StoredTab {
+            id: self.active_tab_id,
+            terminal: std::mem::replace(&mut self.terminal, next_terminal),
+            pty: std::mem::replace(&mut self.pty, next_pty),
+            unread: false,
+        };
+        self.inactive_tabs.push(previous);
+        let insert_at = self.active_tab_index() + 1;
+        self.tab_order.insert(insert_at, new_id);
+        self.active_tab_id = new_id;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
+        self.clear_tab_interaction();
+    }
+
+    /// Returns true if the last tab was closed and rst should quit.
+    fn close_tab(&mut self, id: u64, kill: bool) -> bool {
+        if !self.tab_order.contains(&id) {
+            return false; // Stale reader event from an already closed tab.
+        }
+        if self.tab_order.len() == 1 {
+            if kill { self.pty.terminate(); }
+            return true;
+        }
+        if id == self.active_tab_id {
+            if let Some(next) = tabs::successor_after_close(&self.tab_order, id) {
+                self.switch_tab(next);
+            }
+        }
+        if let Some(position) = self.inactive_tabs.iter().position(|tab| tab.id == id) {
+            let mut old = self.inactive_tabs.swap_remove(position);
+            if kill { old.pty.terminate(); }
+        }
+        self.tab_order.retain(|tab_id| *tab_id != id);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        false
+    }
+
+    fn terminate_all_tabs(&mut self) {
+        self.pty.terminate();
+        for tab in &mut self.inactive_tabs {
+            tab.pty.terminate();
+        }
+    }
+
     fn resize_terminal(&mut self) {
         let (Some(window), Some(renderer)) = (&self.window, &self.renderer) else {
             return;
@@ -85,16 +277,22 @@ impl App {
         let cols = ((size.width as usize).saturating_sub(2 * renderer.padding)
             / renderer.cell_width)
             .max(1);
-        let rows = ((size.height as usize).saturating_sub(2 * renderer.padding)
-            / renderer.cell_height)
-            .max(1);
+        let bar_h = tabs::bar_height(renderer.cell_height, self.config.tabs.enabled);
+        let rows = ((size.height as usize).saturating_sub(
+            2 * renderer.padding + bar_h
+        ) / renderer.cell_height).max(1);
         if (cols, rows) != (self.terminal.screen.cols, self.terminal.screen.rows) {
             self.terminal.screen.resize(cols, rows);
             self.selection = None;
             self.selecting = false;
             self.clicks.reset();
-            self.pty
-                .resize(cols, rows, renderer.cell_width, renderer.cell_height);
+            self.pty.resize(cols, rows, renderer.cell_width, renderer.cell_height);
+            // Hidden shells still need SIGWINCH: their TUIs must have the
+            // correct grid as soon as we switch back to them.
+            for tab in &mut self.inactive_tabs {
+                tab.terminal.screen.resize(cols, rows);
+                tab.pty.resize(cols, rows, renderer.cell_width, renderer.cell_height);
+            }
         }
         window.request_redraw();
         self.update_ime_cursor_area();
@@ -114,7 +312,11 @@ impl App {
              screen.y.min(screen.rows.saturating_sub(1)))
         };
         let x = renderer.padding.saturating_add(col.saturating_mul(renderer.cell_width));
-        let y = renderer.padding.saturating_add(row.saturating_mul(renderer.cell_height));
+        let top_bar = if self.config.tabs.enabled && self.config.tabs.position == "top" {
+            tabs::bar_height(renderer.cell_height, true)
+        } else { 0 };
+        let y = renderer.padding.saturating_add(top_bar)
+            .saturating_add(row.saturating_mul(renderer.cell_height));
         window.set_ime_cursor_area(
             PhysicalPosition::new(x.min(i32::MAX as usize) as i32,
                                   y.min(i32::MAX as usize) as i32),
@@ -124,6 +326,13 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        // Only materialize the tiny tab label list when the bar is enabled.
+        let tab_items = if self.config.tabs.enabled {
+            self.tab_displays()
+        } else {
+            Vec::new()
+        };
+        let active_index = self.active_tab_index();
         let (Some(window), Some(surface), Some(renderer)) =
             (&self.window, &mut self.surface, &mut self.renderer)
         else {
@@ -146,14 +355,28 @@ impl App {
                 return;
             }
         };
-        renderer.draw(
-            &mut buffer,
-            size.width as usize,
-            size.height as usize,
-            &self.terminal.screen,
-            self.selection,
-            self.ime.preedit.as_ref(),
-        );
+        let width_px = size.width as usize;
+        let height_px = size.height as usize;
+        let bar_h = tabs::bar_height(renderer.cell_height, self.config.tabs.enabled)
+            .min(height_px);
+        let content_h = height_px.saturating_sub(bar_h);
+        let top_bar = if self.config.tabs.enabled && self.config.tabs.position == "top" {
+            bar_h
+        } else { 0 };
+        // Render the terminal into a framebuffer slice, without modifying
+        // its grid coordinates or adding an extra framebuffer allocation.
+        let start = top_bar.saturating_mul(width_px);
+        let end = start.saturating_add(content_h.saturating_mul(width_px));
+        if content_h != 0 {
+            renderer.draw(
+                &mut buffer[start..end],
+                width_px,
+                content_h,
+                &self.terminal.screen,
+                self.selection,
+                self.ime.preedit.as_ref(),
+            );
+        }
         if self.bell_flash_until.is_some_and(|until| Instant::now() < until) {
             render::paint_bell_border(
                 &mut buffer,
@@ -164,11 +387,19 @@ impl App {
         }
         if let Some(notice) = &self.toast {
             if let Some(output_id) = notice.output_id {
-                renderer.draw_output_copy_highlight(
-                    &mut buffer, size.width as usize, size.height as usize,
-                    &self.terminal.screen, output_id, notice.opacity(Instant::now()),
-                );
+                if content_h != 0 {
+                    renderer.draw_output_copy_highlight(
+                        &mut buffer[start..end], width_px, content_h,
+                        &self.terminal.screen, output_id, notice.opacity(Instant::now()),
+                    );
+                }
             }
+        }
+        if self.config.tabs.enabled {
+            renderer.draw_tab_bar(
+                &mut buffer, width_px, height_px, &self.terminal.screen,
+                &tab_items, active_index, &self.config.tabs,
+            );
         }
         if self.help_open {
             renderer.draw_help_overlay(
@@ -235,7 +466,11 @@ impl App {
         };
         let x = (self.mouse.0.max(0.0) as usize).saturating_sub(renderer.padding)
             / renderer.cell_width;
-        let y = (self.mouse.1.max(0.0) as usize).saturating_sub(renderer.padding)
+        let top_bar = if self.config.tabs.enabled && self.config.tabs.position == "top" {
+            tabs::bar_height(renderer.cell_height, true)
+        } else { 0 };
+        let y = (self.mouse.1.max(0.0) as usize)
+            .saturating_sub(renderer.padding.saturating_add(top_bar))
             / renderer.cell_height;
         (
             x.min(self.terminal.screen.cols - 1),
@@ -456,7 +691,7 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, event: KeyEvent) {
+    fn handle_key(&mut self, event: KeyEvent, event_loop: &ActiveEventLoop) {
         if event.state != ElementState::Pressed {
             return;
         }
@@ -495,6 +730,48 @@ impl App {
         if command_shortcut(&key, self.modifiers, cfg!(target_os = "macos"), "u") {
             self.toggle_url_picker();
             return;
+        }
+        if self.config.tabs.enabled {
+            let macos = cfg!(target_os = "macos");
+            if tab_shortcut(&key, self.modifiers, macos, "t") {
+                if !event.repeat { self.new_tab(); }
+                return;
+            }
+            if tab_shortcut(&key, self.modifiers, macos, "w") {
+                // A held Cmd+W must not close every tab via auto-repeat.
+                if !event.repeat && self.close_tab(self.active_tab_id, true) {
+                    event_loop.exit();
+                }
+                return;
+            }
+            if matches!(key, Key::Named(NamedKey::Tab))
+                && (self.modifiers == ModifiersState::CONTROL
+                    || self.modifiers == (ModifiersState::CONTROL | ModifiersState::SHIFT))
+            {
+                if !event.repeat {
+                    self.switch_relative_tab(if self.modifiers.shift_key() { -1 } else { 1 });
+                }
+                return;
+            }
+            let digit_modifier = if macos {
+                ModifiersState::SUPER
+            } else {
+                ModifiersState::ALT
+            };
+            if self.modifiers == digit_modifier {
+                if let Key::Character(value) = key {
+                    if let Some(digit) = value.chars().next()
+                        .filter(|_| value.len() == 1)
+                        .and_then(|ch| ch.to_digit(10))
+                        .filter(|digit| (1..=9).contains(digit))
+                    {
+                        if let Some(id) = self.tab_order.get(digit as usize - 1).copied() {
+                            self.switch_tab(id);
+                        }
+                        return;
+                    }
+                }
+            }
         }
         // Typing wakes the cursor and restarts the blink interval.
         self.reset_cursor_blink();
@@ -588,6 +865,21 @@ fn command_shortcut(
         && modifiers.shift_key()
         && !modifiers.alt_key()
         && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case(letter))
+}
+
+fn tab_shortcut(
+    key: &Key<&str>,
+    modifiers: ModifiersState,
+    macos: bool,
+    letter: &str,
+) -> bool {
+    let required = if macos {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL | ModifiersState::SHIFT
+    };
+    modifiers == required
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case(letter))
 }
 
 fn zoomed_font_size(current: f32, initial: f32, action: ZoomAction) -> f32 {
@@ -740,7 +1032,10 @@ impl ApplicationHandler<UserEvent> for App {
         let logical_width = self.config.window.columns as f64 * self.config.font.size as f64 * 0.65
             + 2.0 * self.config.window.padding as f64;
         let logical_height = self.config.window.rows as f64 * self.config.font.size as f64 * 1.40
-            + 2.0 * self.config.window.padding as f64;
+            + 2.0 * self.config.window.padding as f64
+            + if self.config.tabs.enabled {
+                self.config.font.size as f64 * 1.40 + 6.0
+            } else { 0.0 };
         let attributes = Window::default_attributes()
             .with_title(&self.terminal.screen.title)
             .with_inner_size(LogicalSize::new(logical_width, logical_height));
@@ -794,7 +1089,10 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.terminate_all_tabs();
+                event_loop.exit();
+            },
             WindowEvent::Resized(_) => self.resize_terminal(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(renderer) = self.renderer.as_mut() {
@@ -807,7 +1105,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
-            WindowEvent::KeyboardInput { event, .. } => self.handle_key(event),
+            WindowEvent::KeyboardInput { event, .. } => self.handle_key(event, event_loop),
             WindowEvent::Ime(event) => {
                 if self.help_open || self.url_picker.is_some() {
                     self.ime.clear();
@@ -852,7 +1150,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
-                if self.help_open || self.url_picker.is_some() { return; }
+                if self.help_open || self.url_picker.is_some() || self.mouse_in_bar() {
+                    return;
+                }
                 let tracking = self.terminal.screen.mouse_tracking;
                 if tracking.enabled() && !self.modifiers.shift_key() && !self.selecting {
                     let at = self.cell_at_mouse();
@@ -882,6 +1182,30 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseInput { button, state, .. } => {
                 if self.help_open || self.url_picker.is_some() { return; }
+                if self.mouse_in_bar() {
+                    if button == MouseButton::Left && state == ElementState::Pressed {
+                        match self.tab_bar_action() {
+                            Some(tabs::TabAction::Select(index)) => {
+                                if let Some(id) = self.tab_order.get(index).copied() {
+                                    self.switch_tab(id);
+                                }
+                            }
+                            Some(tabs::TabAction::Close(index)) => {
+                                if let Some(id) = self.tab_order.get(index).copied() {
+                                    if self.close_tab(id, true) {
+                                        event_loop.exit();
+                                    }
+                                }
+                            }
+                            Some(tabs::TabAction::New) => self.new_tab(),
+                            None => {}
+                        }
+                    }
+                    // Never forward tab-bar mouse input to a child TUI.
+                    self.selecting = false;
+                    self.mouse_reporter.reset();
+                    return;
+                }
                 let tracking = self.terminal.screen.mouse_tracking;
                 let at = self.cell_at_mouse();
                 // Once Shift begins a local selection inside a TUI, finish
@@ -980,6 +1304,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                if self.mouse_in_bar() { return; }
                 let tracking = self.terminal.screen.mouse_tracking;
                 if tracking.enabled() && !self.modifiers.shift_key() {
                     let cell_size = self.renderer.as_ref().map_or(
@@ -1023,7 +1348,33 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Output(bytes) => {
+            UserEvent::Output { tab_id, bytes } => {
+                if tab_id != self.active_tab_id {
+                    // Hidden tabs still parse their VT stream and answer
+                    // terminal queries, but NEVER request a redraw per chunk.
+                    let mut became_unread = false;
+                    if let Some(tab) = self.inactive_tabs.iter_mut()
+                        .find(|tab| tab.id == tab_id)
+                    {
+                        tab.terminal.advance(&bytes);
+                        let replies = tab.terminal.screen.take_replies();
+                        if !replies.is_empty() { tab.pty.write(&replies); }
+                        // Do not allow a hidden tab to steal the clipboard
+                        // or trigger audio/visual bell on the active tab.
+                        let _ = tab.terminal.screen.take_clipboard_writes();
+                        let _ = tab.terminal.screen.take_bells();
+                        if !tab.unread {
+                            tab.unread = true;
+                            became_unread = true;
+                        }
+                    }
+                    if became_unread {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 let previous_mouse_mode = self.terminal.screen.mouse_tracking;
                 let previous_alt_screen = self.terminal.screen.in_alternate_screen();
                 let previous_view_offset = self.terminal.screen.view_offset;
@@ -1081,9 +1432,35 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                 }
             }
-            UserEvent::Closed => event_loop.exit(),
+            UserEvent::Closed { tab_id } => {
+                if self.close_tab(tab_id, false) {
+                    event_loop.exit();
+                }
+            },
         }
     }
+}
+
+fn configured_terminal(config: &Config, cols: usize, rows: usize) -> Result<Terminal> {
+    let palette = Palette::try_from(&config.colors)?;
+    let mut terminal = Terminal::new(cols, rows, config.scrollback.lines, palette);
+    terminal.screen.osc52_write_allowed =
+        config.clipboard.enabled && config.clipboard.osc52_write;
+    terminal.screen.command_capture = CommandCapture::with_url_history(
+        config.command_output.max_megabytes.saturating_mul(1024 * 1024),
+        config.url_picker.recent_outputs,
+    );
+    let shape = match config.cursor.style.as_str() {
+        "block" => CursorShape::Block,
+        "underline" => CursorShape::Underline,
+        "bar" => CursorShape::Bar,
+        _ => unreachable!("validated cursor style"),
+    };
+    terminal.screen.set_default_cursor_style(CursorStyle {
+        shape,
+        blink: config.cursor.blink,
+    });
+    Ok(terminal)
 }
 
 fn main() -> Result<()> {
@@ -1100,40 +1477,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let config = config::load()?;
-    let palette = Palette::try_from(&config.colors)?;
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     // softbuffer's platform error holds non-Send raw window handles.
     // Convert it into an owned diagnostic before passing through anyhow.
     let context = Context::new(event_loop.owned_display_handle())
         .map_err(|err| anyhow::anyhow!("cannot initialize display: {err}"))?;
+    let proxy = event_loop.create_proxy();
     let pty = PtySession::start(
-        config.window.columns,
-        config.window.rows,
-        &config.terminal.term,
-        event_loop.create_proxy(),
+        1, config.window.columns, config.window.rows,
+        &config.terminal.term, proxy.clone(),
     )?;
-    let mut terminal = Terminal::new(
-        config.window.columns,
-        config.window.rows,
-        config.scrollback.lines,
-        palette,
-    );
-    terminal.screen.osc52_write_allowed = config.clipboard.enabled && config.clipboard.osc52_write;
-    terminal.screen.command_capture = CommandCapture::with_url_history(
-        config.command_output.max_megabytes.saturating_mul(1024 * 1024),
-        config.url_picker.recent_outputs,
-    );
-    let shape = match config.cursor.style.as_str() {
-        "block" => CursorShape::Block,
-        "underline" => CursorShape::Underline,
-        "bar" => CursorShape::Bar,
-        _ => unreachable!("validated cursor style"),
-    };
-    terminal.screen.set_default_cursor_style(CursorStyle {
-        shape,
-        blink: config.cursor.blink,
-    });
+    let terminal = configured_terminal(
+        &config, config.window.columns, config.window.rows,
+    )?;
     let original_font_size = config.font.size;
     let config_blink_ms = config.cursor.blink_interval_ms;
     let mut app = App {
@@ -1141,6 +1498,13 @@ fn main() -> Result<()> {
         original_font_size,
         terminal,
         pty,
+        active_tab_id: 1,
+        next_tab_id: 2,
+        tab_order: vec![1],
+        inactive_tabs: Vec::new(),
+        proxy,
+        shell_label: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+            .rsplit('/').next().unwrap_or("sh").to_string(),
         context,
         window: None,
         surface: None,
@@ -1230,6 +1594,19 @@ mod keyboard_tests {
             zoom_shortcut(&Key::Character("x"), cmd, true),
             None
         );
+    }
+
+    #[test]
+    fn tab_shortcuts_do_not_collide_with_old_window_bindings() {
+        let cmd = ModifiersState::SUPER;
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(tab_shortcut(&Key::Character("t"), cmd, true, "t"));
+        assert!(tab_shortcut(&Key::Character("T"), ctrl_shift, false, "t"));
+        assert!(tab_shortcut(&Key::Character("w"), cmd, true, "w"));
+        assert!(!tab_shortcut(&Key::Character("t"), cmd, false, "t"));
+        assert!(!tab_shortcut(&Key::Character("t"), ctrl_shift, true, "t"));
+        assert!(!tab_shortcut(&Key::Character("t"), cmd | ModifiersState::SHIFT, true, "t"));
+        assert!(!tab_shortcut(&Key::Character("w"), cmd | ModifiersState::ALT, true, "w"));
     }
 
     #[test]

@@ -136,6 +136,61 @@ Install it using `make shell-integration` or
 `rst --install-shell-integration`, and launch a new shell. The picker
 is session-local; URL history is not written to disk.
 
+### Optional native tabs with a Gruvbox bar
+
+rst can manage **real, independent terminal sessions** inside one native
+window. Each tab has its own shell, PTY, terminal/scrollback, OSC 133
+command-output capture and URL picker history. The bar is painted with
+rst's existing glyph renderer (no extra framework, subprocess, daemon or
+second window) and is **disabled by default**, preserving the single-tab
+experience and rendering dimensions.
+
+Enable it in `~/.config/rst/config.toml`:
+
+```toml
+[tabs]
+enabled = true
+position = "top"       # or "bottom"
+max_tabs = 10          # 1..32
+close_buttons = true
+
+[tabs.colors]
+background = "#282828"
+foreground = "#a89984"
+inactive_background = "#3c3836"
+active_background = "#fabd2f"
+active_foreground = "#282828"
+accent = "#83a598"
+unread = "#b8bb26"
+```
+
+These are **Gruvbox-inspired, independently editable** default colors.
+No extra palette dependency is required. The bar occupies exactly one
+font-cell row plus six physical pixels; fullscreen TUIs receive the remaining
+grid size through PTY resize, including when switching tabs or zooming.
+
+| Action | macOS | Wayland |
+| --- | --- | --- |
+| New tab | **Cmd+T** | **Ctrl+Shift+T** |
+| Close current tab | **Cmd+W** | **Ctrl+Shift+W** |
+| Next / previous | **Ctrl+Tab / Ctrl+Shift+Tab** | Same |
+| Switch to tab 1–9 | **Cmd+1..9** | **Alt+1..9** |
+| Mouse | Click a tab, its **×**, or **+** | Same |
+
+Closing a tab terminates its shell; closing the final tab exits rst.
+A shell that exits on its own removes that tab, without closing other
+sessions. A green indicator marks background output until the tab is
+visited. When the bar is narrower than the tab list, it always displays
+the active tab, while keyboard shortcuts can reach the rest.
+
+**Performance:** only the active terminal is rendered; background tabs
+process their PTY streams and respond to terminal queries but do not
+trigger per-output redraws. Tab content and cursor/scrollback state are
+preserved when switching, and only one renderer/font cache exists.
+Creating more tabs still consumes RAM and CPU for their shell processes
+and individual scrollback buffers. This is not a tmux-style persistent
+session: closing rst also closes its terminals. F1 lists the shortcuts.
+
 ### Default colors
 
 The bundled default terminal background is `#282828`. If your existing

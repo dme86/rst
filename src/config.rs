@@ -16,6 +16,8 @@ pub struct Config {
     #[serde(default)]
     pub url_picker: UrlPickerConfig,
     #[serde(default)]
+    pub tabs: TabsConfig,
+    #[serde(default)]
     pub bell: BellConfig,
     pub colors: Colors,
 }
@@ -85,6 +87,54 @@ pub struct UrlPickerConfig {
 
 impl Default for UrlPickerConfig {
     fn default() -> Self { Self { recent_outputs: 20 } }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct TabsConfig {
+    pub enabled: bool,
+    pub max_tabs: usize,
+    pub position: String,
+    pub close_buttons: bool,
+    pub colors: TabColors,
+}
+
+impl Default for TabsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_tabs: 10,
+            position: "top".into(),
+            close_buttons: true,
+            colors: TabColors::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct TabColors {
+    pub background: String,
+    pub foreground: String,
+    pub inactive_background: String,
+    pub active_background: String,
+    pub active_foreground: String,
+    pub accent: String,
+    pub unread: String,
+}
+
+impl Default for TabColors {
+    fn default() -> Self {
+        Self {
+            background: "#282828".into(),
+            foreground: "#a89984".into(),
+            inactive_background: "#3c3836".into(),
+            active_background: "#fabd2f".into(),
+            active_foreground: "#282828".into(),
+            accent: "#83a598".into(),
+            unread: "#b8bb26".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -167,6 +217,19 @@ pub fn load() -> Result<Config> {
         "command_output.max_megabytes must be 1..128");
     anyhow::ensure!((1..=100).contains(&config.url_picker.recent_outputs),
         "url_picker.recent_outputs must be 1..100");
+    anyhow::ensure!((1..=32).contains(&config.tabs.max_tabs),
+        "tabs.max_tabs must be 1..32");
+    anyhow::ensure!(matches!(config.tabs.position.as_str(), "top" | "bottom"),
+        "tabs.position must be top or bottom");
+    for color in [
+        &config.tabs.colors.background, &config.tabs.colors.foreground,
+        &config.tabs.colors.inactive_background, &config.tabs.colors.active_background,
+        &config.tabs.colors.active_foreground, &config.tabs.colors.accent,
+        &config.tabs.colors.unread,
+    ] {
+        anyhow::ensure!(crate::tabs::parse_color(color).is_some(),
+            "tabs.colors values must be #RRGGBB");
+    }
     anyhow::ensure!(supported_cursor_style(&config.cursor.style), "cursor.style must be block, underline, or bar");
     anyhow::ensure!((100..=3000).contains(&config.cursor.blink_interval_ms), "cursor.blink_interval_ms must be 100..3000");
     Ok(config)
@@ -188,6 +251,23 @@ mod tests {
         value.as_table_mut().unwrap().remove("url_picker");
         let legacy: Config = value.try_into().unwrap();
         assert_eq!(legacy.url_picker.recent_outputs, 20);
+    }
+
+    #[test]
+    fn optional_tabs_default_off_and_legacy_configs_work() {
+        let base: Config = toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert!(!base.tabs.enabled);
+        assert_eq!(base.tabs.max_tabs, 10);
+        assert_eq!(base.tabs.position, "top");
+        assert_eq!(base.tabs.colors.active_background, "#fabd2f");
+        let mut legacy: toml::Value = toml::from_str(include_str!("../config/default.toml")).unwrap();
+        legacy.as_table_mut().unwrap().remove("tabs");
+        let parsed: Config = legacy.try_into().unwrap();
+        assert!(!parsed.tabs.enabled);
+        assert_eq!(parsed.tabs.colors.active_background, "#fabd2f");
+        let partial: TabsConfig = toml::from_str("enabled = true").unwrap();
+        assert!(partial.enabled);
+        assert_eq!(partial.max_tabs, 10);
     }
 
     #[test]
