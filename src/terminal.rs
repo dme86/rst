@@ -1306,6 +1306,10 @@ impl Terminal {
 mod vt_modes_tests;
 
 #[cfg(test)]
+#[path = "osc_tests.rs"]
+mod osc_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
