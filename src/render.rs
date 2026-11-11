@@ -6,7 +6,7 @@ use fontdue::{Font, FontSettings, Metrics};
 
 use crate::{
     config::FontConfig,
-    terminal::{Cell, Screen, TextStyle},
+    terminal::{Cell, CursorShape, Screen, TextStyle},
 };
 
 struct Glyph {
@@ -310,6 +310,11 @@ impl Renderer {
                 );
             }
         }
+
+        // Unlike the block cursor, underline and bar must be painted over
+        // the completed glyphs. Otherwise the text can hide the thin stroke.
+        paint_cursor(pixels, width, height, screen,
+                     self.cell_width, self.cell_height, self.padding);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -811,6 +816,51 @@ fn paint_backgrounds(
     }
 }
 
+/// Cursor visibility is governed by DECTCEM, scrollback and the active
+/// blink phase. Steady DECSCUSR styles keep cursor_blink_on set to true.
+fn cursor_is_visible(screen: &Screen) -> bool {
+    screen.show_cursor && screen.cursor_blink_on && screen.view_offset == 0
+}
+
+/// Draw narrow cursor styles after the glyph pass. A block cursor uses the
+/// existing per-cell background/foreground treatment in cell_colors().
+#[allow(clippy::too_many_arguments)]
+fn paint_cursor(
+    pixels: &mut [u32],
+    stride: usize,
+    height: usize,
+    screen: &Screen,
+    cell_width: usize,
+    cell_height: usize,
+    padding: usize,
+) {
+    if !cursor_is_visible(screen) || cell_width == 0 || cell_height == 0
+        || screen.rows == 0 || screen.cols == 0
+    {
+        return;
+    }
+
+    let x = padding.saturating_add(screen.x.min(screen.cols - 1).saturating_mul(cell_width));
+    let y = padding.saturating_add(screen.y.min(screen.rows - 1).saturating_mul(cell_height));
+    let thickness = (cell_width.min(cell_height) / 7).clamp(1, 3);
+    let color = if screen.reverse_video {
+        screen.palette.background
+    } else {
+        screen.palette.cursor
+    };
+    match screen.cursor_style.shape {
+        CursorShape::Block => {}
+        CursorShape::Underline => rect(
+            pixels, stride, height,
+            x, y.saturating_add(cell_height.saturating_sub(thickness)),
+            cell_width, thickness, color,
+        ),
+        CursorShape::Bar => rect(
+            pixels, stride, height, x, y, thickness, cell_height, color,
+        ),
+    }
+}
+
 fn cell_colors(
     screen: &Screen,
     row: usize,
@@ -826,9 +876,8 @@ fn cell_colors(
         };
         (row, col) >= (start.1, start.0) && (row, col) <= (end.1, end.0)
     });
-    let cursor = screen.show_cursor
-        && screen.cursor_blink_on
-        && screen.view_offset == 0
+    let cursor = cursor_is_visible(screen)
+        && screen.cursor_style.shape == CursorShape::Block
         && row == screen.y
         && col == screen.x.min(screen.cols - 1);
     let colors = if cursor {
