@@ -771,6 +771,119 @@ impl Screen {
         }
     }
 
+    /// Drain trusted clipboard-write requests at the UI boundary, where
+    /// native clipboard access is available. Never expose clipboard reads.
+    pub fn take_clipboard_writes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.clipboard_writes)
+    }
+
+    fn set_osc_color(&mut self, code: u16, value: u32) {
+        match code {
+            10 => self.palette.foreground = value,
+            11 => self.palette.background = value,
+            12 => self.palette.cursor = value,
+            _ => return,
+        }
+        self.refresh_palette();
+    }
+
+    fn reset_osc_color(&mut self, code: u16) {
+        let value = match code {
+            110 => self.initial_palette.foreground,
+            111 => self.initial_palette.background,
+            112 => self.initial_palette.cursor,
+            _ => return,
+        };
+        self.set_osc_color(code - 100, value);
+    }
+
+    fn handle_osc(&mut self, params: &[&[u8]]) {
+        let Some(code) = params.first().and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|p| p.parse::<u16>().ok()) else {
+            return;
+        };
+        match code {
+            0 | 1 | 2 => {
+                if params.len() < 2 {
+                    return;
+                }
+                // OSC titles may themselves contain semicolons; vte splits
+                // those into arguments, so restore them before validation.
+                let mut value = Vec::new();
+                for (i, part) in params[1..].iter().enumerate() {
+                    if i != 0 { value.push(b';'); }
+                    if value.len().saturating_add(part.len()) > 4096 {
+                        return;
+                    }
+                    value.extend_from_slice(part);
+                }
+                if let Some(title) = osc::title(&value) {
+                    let title = if title.is_empty() { DEFAULT_TITLE.to_string() } else { title };
+                    if code == 0 || code == 2 { self.title = title.clone(); }
+                    if code == 0 || code == 1 { self.icon_title = title; }
+                }
+            }
+            4 => {
+                // OSC 4 accepts multiple index;spec pairs in one string.
+                let mut updated = false;
+                for pair in params[1..].chunks_exact(2) {
+                    let Some(index) = std::str::from_utf8(pair[0]).ok()
+                        .and_then(|v| v.parse::<u8>().ok()) else { continue };
+                    if pair[1] == b"?" {
+                        self.replies.extend(osc::color_reply(4, Some(index), self.palette.indexed(index)));
+                    } else if let Some(color) = osc::parse_color(pair[1]) {
+                        self.palette.set_indexed(index, color);
+                        updated = true;
+                    }
+                }
+                if updated { self.refresh_palette(); }
+            }
+            10 | 11 | 12 => {
+                let Some(arg) = params.get(1) else { return };
+                if *arg == b"?" {
+                    let color = match code {
+                        10 => self.palette.foreground,
+                        11 => self.palette.background,
+                        _ => self.palette.cursor,
+                    };
+                    self.replies.extend(osc::color_reply(code, None, color));
+                } else if let Some(color) = osc::parse_color(arg) {
+                    self.set_osc_color(code, color);
+                }
+            }
+            52 => {
+                if self.osc52_write_allowed && self.clipboard_writes.len() < 8 {
+                    if let (Some(selection), Some(payload)) = (params.get(1), params.get(2)) {
+                        if let Some(text) = osc::clipboard_write(selection, payload) {
+                            self.clipboard_writes.push(text);
+                        }
+                    }
+                }
+            }
+            104 => {
+                // Without indices, OSC 104 resets the complete 256-color
+                // palette to the configured initial values.
+                if params.len() == 1 || params[1..].iter().all(|p| p.is_empty()) {
+                    self.palette.ansi = self.initial_palette.ansi;
+                    self.palette.extended = self.initial_palette.extended;
+                    self.refresh_palette();
+                } else {
+                    let mut updated = false;
+                    for arg in &params[1..] {
+                        if let Some(index) = std::str::from_utf8(arg).ok()
+                            .and_then(|v| v.parse::<u8>().ok()) {
+                            self.palette.set_indexed(index, self.initial_palette.indexed(index));
+                            updated = true;
+                        }
+                    }
+                    if updated { self.refresh_palette(); }
+                }
+            }
+            110..=112 => self.reset_osc_color(code),
+            _ => {} // Never run unknown OSC commands or window operations.
+        }
+    }
+
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
     }
@@ -939,6 +1052,10 @@ impl Screen {
 }
 
 impl Perform for Screen {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.handle_osc(params);
+    }
+
     fn print(&mut self, c: char) {
         self.put_char(c);
     }
@@ -1156,8 +1273,10 @@ impl Perform for Screen {
                 let cols = self.cols;
                 let rows = self.rows;
                 let limit = self.history_limit;
-                let palette = self.palette.clone();
+                let palette = self.initial_palette.clone();
+                let osc52_allowed = self.osc52_write_allowed;
                 *self = Self::new(cols, rows, limit, palette);
+                self.osc52_write_allowed = osc52_allowed;
             }
             _ => {}
         }
