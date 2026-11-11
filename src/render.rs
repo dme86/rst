@@ -2382,6 +2382,54 @@ mod tests {
     }
 
     #[test]
+    fn url_picker_highlights_selection_without_modifying_terminal() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(80, 24, 2, palette);
+        term.advance(b"normal terminal output");
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &term.screen, None, None);
+        let baseline = pixels.clone();
+        let mut picker = crate::url_picker::UrlPicker::new(
+            vec!["https://example.org".into(), "https://rust-lang.org".into()],
+        );
+        renderer.draw_url_picker_overlay(
+            &mut pixels, width, height, &term.screen, &picker, 20,
+        );
+        assert_ne!(pixels, baseline);
+        let first = pixels.clone();
+        picker.move_by(1, crate::url_picker::visible_rows(term.screen.rows));
+        renderer.draw(&mut pixels, width, height, &term.screen, None, None);
+        renderer.draw_url_picker_overlay(
+            &mut pixels, width, height, &term.screen, &picker, 20,
+        );
+        assert_ne!(pixels, first);
+        assert_eq!(term.screen.grid[0][0].ch, 'n');
+        assert!(term.screen.history.is_empty());
+    }
+
+    #[test]
+    fn url_picker_clips_safely_on_tiny_windows() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let term = crate::terminal::Terminal::new(3, 2, 0, palette);
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw_url_picker_overlay(
+            &mut pixels, width, height, &term.screen,
+            &crate::url_picker::UrlPicker::new(vec![]), 20,
+        );
+        assert!(pixels.iter().any(|&px| px != 0));
+    }
+
+    #[test]
     fn copy_confirmation_overlay_clips_in_small_windows() {
         let config: crate::config::Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
