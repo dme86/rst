@@ -30,6 +30,13 @@ lines = 10000
 [terminal]
 term = "xterm-256color"
 
+[bell]
+# BEL (0x07) alerts. Audible: macOS system bell / Wayland libcanberra.
+# The brief visual flash works even without a sound server or theme.
+enabled = true
+audible = true
+visual = true
+
 [clipboard]
 enabled = true
 copy_on_select = false

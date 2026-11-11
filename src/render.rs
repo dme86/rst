@@ -905,6 +905,24 @@ fn rect(
     }
 }
 
+/// Subtle, short visual BEL indicator. Draw *after* the terminal glyphs;
+/// no reflow, font changes, or fullscreen inversion. This is also a usable
+/// fallback on Wayland systems without an installed libcanberra sound player.
+pub fn paint_bell_border(pixels: &mut [u32], width: usize, height: usize, color: u32) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let height = height.min(pixels.len() / width);
+    if height == 0 {
+        return;
+    }
+    let thickness = 2usize.min(width).min(height);
+    rect(pixels, width, height, 0, 0, width, thickness, color);
+    rect(pixels, width, height, 0, height - thickness, width, thickness, color);
+    rect(pixels, width, height, 0, 0, thickness, height, color);
+    rect(pixels, width, height, width - thickness, 0, thickness, height, color);
+}
+
 fn blend(fg: u32, bg: u32, alpha: u8) -> u32 {
     let a = alpha as u32;
     let mix = |shift: u32| {
@@ -1360,6 +1378,36 @@ mod tests {
             cell_colors(&term.screen, 0, 5, term.screen.grid[0][5], Some(selected)).1,
             term.screen.palette.background
         );
+    }
+
+
+    #[test]
+    fn bell_border_colors_only_two_pixel_outline() {
+        let mut pixels = vec![0x112233u32; 10 * 8];
+        paint_bell_border(&mut pixels, 10, 8, 0xffcc00);
+        for y in 0..8 {
+            for x in 0..10 {
+                let expected = if x < 2 || x >= 8 || y < 2 || y >= 6 {
+                    0xffcc00
+                } else {
+                    0x112233
+                };
+                assert_eq!(pixels[y * 10 + x], expected, "pixel ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn bell_border_is_safe_for_tiny_and_zero_sized_surfaces() {
+        let mut empty = Vec::<u32>::new();
+        paint_bell_border(&mut empty, 0, 0, 0xffffff);
+        paint_bell_border(&mut empty, 1, 1, 0xffffff);
+        let mut one = [0u32];
+        paint_bell_border(&mut one, 1, 1, 0xabcdef);
+        assert_eq!(one, [0xabcdef]);
+        let mut short = [0u32; 3];
+        paint_bell_border(&mut short, 4, 100, 0xffffff);
+        assert_eq!(short, [0, 0, 0]); // incomplete scanline stays intact
     }
 
 }

@@ -250,6 +250,7 @@ pub struct Screen {
     saved_primary_cursor: Option<CursorSnapshot>,
     alternate: Option<SavedScreen>,
     replies: Vec<u8>,
+    pending_bells: u8,
 }
 
 impl Screen {
@@ -338,6 +339,7 @@ impl Screen {
             saved_primary_cursor: None,
             alternate: None,
             replies: Vec::new(),
+            pending_bells: 0,
         }
     }
 
@@ -976,6 +978,12 @@ impl Screen {
         }
     }
 
+    /// Drain pending BEL (0x07) notifications. Keep parser state separate
+    /// from UI sound and urgency handling, and bound flood output.
+    pub fn take_bells(&mut self) -> u8 {
+        std::mem::take(&mut self.pending_bells)
+    }
+
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
     }
@@ -1137,6 +1145,7 @@ impl Perform for Screen {
 
     fn execute(&mut self, byte: u8) {
         match byte {
+            0x07 => self.pending_bells = self.pending_bells.saturating_add(1),
             0x0e => self.active_charset = 1, // SO / LS1: invoke G1
             0x0f => self.active_charset = 0, // SI / LS0: invoke G0
             b'\r' => {
@@ -1380,7 +1389,11 @@ impl Perform for Screen {
                 let palette = self.initial_palette.clone();
                 let osc52_allowed = self.osc52_write_allowed;
                 let default_cursor_style = self.default_cursor_style;
+                // A BEL before RIS in the same PTY read still rings; the
+                // reset must not discard unconsumed UI notifications.
+                let pending_bells = self.pending_bells;
                 *self = Self::new(cols, rows, limit, palette);
+                self.pending_bells = pending_bells;
                 self.osc52_write_allowed = osc52_allowed;
                 self.set_default_cursor_style(default_cursor_style);
             }
@@ -1422,6 +1435,10 @@ mod cursor_tests;
 #[cfg(test)]
 #[path = "charset_tests.rs"]
 mod charset_tests;
+
+#[cfg(test)]
+#[path = "attention_tests.rs"]
+mod attention_tests;
 
 #[cfg(test)]
 mod tests {

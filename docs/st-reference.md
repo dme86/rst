@@ -147,6 +147,27 @@ vendor or translate upstream C source.
 - Table tests in src/charset.rs; 14 streamed-PTY cases in
   src/charset_tests.rs for registration, shifts, Unicode, wrap and reset.
 
+## Focus events and terminal BEL (implemented)
+
+- Retain existing DECSET 1004 / DECRST 1004 parser state. The winit event
+  bridge sends exact `CSI I` / `CSI O` byte sequences on real focus
+  transitions and ignores duplicate events; focus state is tracked
+  even while reporting is disabled.
+- Capture ASCII BEL (0x07) via `Perform::execute` as a bounded pending
+  event. OSC's BEL terminator is not a separate terminal bell, and
+  pending events survive reset within the same PTY buffer.
+- UI sound uses native `NSBeep()` on macOS and the freedesktop
+  `bell-terminal` sound through optional `canberra-gtk-play` on Wayland.
+  The Linux process is spawned off the UI thread and reaped.
+- A 150 ms limiter prevents output floods; a 160 ms border overlay
+  provides a backend-independent visual alert with no busy-loop.
+- Like st's `xbell`, a bell from an unfocused terminal requests attention
+  using winit's API (subject to Wayland compositor capabilities).
+- `[bell]` settings enable/disable audible and visual feedback, while
+  preserving compatibility with older user TOML configs.
+- Tests: `src/attention.rs`, `src/attention_tests.rs`, and pixel assertions
+  in `src/render.rs`.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
