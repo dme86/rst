@@ -690,7 +690,7 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, event: KeyEvent) {
+    fn handle_key(&mut self, event: KeyEvent, event_loop: &ActiveEventLoop) {
         if event.state != ElementState::Pressed {
             return;
         }
@@ -729,6 +729,45 @@ impl App {
         if command_shortcut(&key, self.modifiers, cfg!(target_os = "macos"), "u") {
             self.toggle_url_picker();
             return;
+        }
+        if self.config.tabs.enabled {
+            let macos = cfg!(target_os = "macos");
+            if tab_shortcut(&key, self.modifiers, macos, "t") {
+                self.new_tab();
+                return;
+            }
+            if tab_shortcut(&key, self.modifiers, macos, "w") {
+                if self.close_tab(self.active_tab_id, true) {
+                    event_loop.exit();
+                }
+                return;
+            }
+            if matches!(key, Key::Named(NamedKey::Tab))
+                && (self.modifiers == ModifiersState::CONTROL
+                    || self.modifiers == (ModifiersState::CONTROL | ModifiersState::SHIFT))
+            {
+                self.switch_relative_tab(if self.modifiers.shift_key() { -1 } else { 1 });
+                return;
+            }
+            let digit_modifier = if macos {
+                ModifiersState::SUPER
+            } else {
+                ModifiersState::ALT
+            };
+            if self.modifiers == digit_modifier {
+                if let Key::Character(value) = key {
+                    if let Some(digit) = value.chars().next()
+                        .filter(|_| value.len() == 1)
+                        .and_then(|ch| ch.to_digit(10))
+                        .filter(|digit| (1..=9).contains(digit))
+                    {
+                        if let Some(id) = self.tab_order.get(digit as usize - 1).copied() {
+                            self.switch_tab(id);
+                        }
+                        return;
+                    }
+                }
+            }
         }
         // Typing wakes the cursor and restarts the blink interval.
         self.reset_cursor_blink();
@@ -822,6 +861,21 @@ fn command_shortcut(
         && modifiers.shift_key()
         && !modifiers.alt_key()
         && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case(letter))
+}
+
+fn tab_shortcut(
+    key: &Key<&str>,
+    modifiers: ModifiersState,
+    macos: bool,
+    letter: &str,
+) -> bool {
+    let required = if macos {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL | ModifiersState::SHIFT
+    };
+    modifiers == required
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case(letter))
 }
 
 fn zoomed_font_size(current: f32, initial: f32, action: ZoomAction) -> f32 {
@@ -974,7 +1028,10 @@ impl ApplicationHandler<UserEvent> for App {
         let logical_width = self.config.window.columns as f64 * self.config.font.size as f64 * 0.65
             + 2.0 * self.config.window.padding as f64;
         let logical_height = self.config.window.rows as f64 * self.config.font.size as f64 * 1.40
-            + 2.0 * self.config.window.padding as f64;
+            + 2.0 * self.config.window.padding as f64
+            + if self.config.tabs.enabled {
+                self.config.font.size as f64 * 1.40 + 6.0
+            } else { 0.0 };
         let attributes = Window::default_attributes()
             .with_title(&self.terminal.screen.title)
             .with_inner_size(LogicalSize::new(logical_width, logical_height));
@@ -1041,7 +1098,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
-            WindowEvent::KeyboardInput { event, .. } => self.handle_key(event),
+            WindowEvent::KeyboardInput { event, .. } => self.handle_key(event, event_loop),
             WindowEvent::Ime(event) => {
                 if self.help_open || self.url_picker.is_some() {
                     self.ime.clear();
@@ -1086,7 +1143,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
-                if self.help_open || self.url_picker.is_some() { return; }
+                if self.help_open || self.url_picker.is_some() || self.mouse_in_bar() {
+                    return;
+                }
                 let tracking = self.terminal.screen.mouse_tracking;
                 if tracking.enabled() && !self.modifiers.shift_key() && !self.selecting {
                     let at = self.cell_at_mouse();
@@ -1116,6 +1175,30 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseInput { button, state, .. } => {
                 if self.help_open || self.url_picker.is_some() { return; }
+                if self.mouse_in_bar() {
+                    if button == MouseButton::Left && state == ElementState::Pressed {
+                        match self.tab_bar_action() {
+                            Some(tabs::TabAction::Select(index)) => {
+                                if let Some(id) = self.tab_order.get(index).copied() {
+                                    self.switch_tab(id);
+                                }
+                            }
+                            Some(tabs::TabAction::Close(index)) => {
+                                if let Some(id) = self.tab_order.get(index).copied() {
+                                    if self.close_tab(id, true) {
+                                        event_loop.exit();
+                                    }
+                                }
+                            }
+                            Some(tabs::TabAction::New) => self.new_tab(),
+                            None => {}
+                        }
+                    }
+                    // Never forward tab-bar mouse input to a child TUI.
+                    self.selecting = false;
+                    self.mouse_reporter.reset();
+                    return;
+                }
                 let tracking = self.terminal.screen.mouse_tracking;
                 let at = self.cell_at_mouse();
                 // Once Shift begins a local selection inside a TUI, finish
@@ -1214,6 +1297,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                if self.mouse_in_bar() { return; }
                 let tracking = self.terminal.screen.mouse_tracking;
                 if tracking.enabled() && !self.modifiers.shift_key() {
                     let cell_size = self.renderer.as_ref().map_or(
