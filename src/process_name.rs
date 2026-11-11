@@ -67,6 +67,24 @@ mod tests {
         assert_eq!(executable_name(0), None);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_libproc_reports_this_executable() {
+        let actual = executable_name(std::process::id() as i32);
+        assert!(actual.is_some(), "macOS must resolve our own executable");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_name_is_not_a_typed_command_argument() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("2").spawn().expect("sleep must be available");
+        let actual = executable_name(child.id() as i32);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(actual.as_deref(), Some("sleep"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn unknown_linux_pid_is_not_an_executable() {
