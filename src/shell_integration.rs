@@ -30,7 +30,7 @@ end
         format!(r#"
 {MARKER}
 if [ "$TERM_PROGRAM" = rst ]; then
-    . "${XDG_CONFIG_HOME:-$HOME/.config}/rst/shell-integration/{script}"
+    . "${{XDG_CONFIG_HOME:-$HOME/.config}}/rst/shell-integration/{script}"
 fi
 "#)
     }
