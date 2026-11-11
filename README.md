@@ -153,6 +153,7 @@ enabled = true
 position = "top"       # or "bottom"
 max_tabs = 10          # 1..32
 close_buttons = true
+name_mode = "smart"   # "smart", "directory", "title", "shell"
 
 [tabs.colors]
 background = "#282828"
@@ -163,6 +164,33 @@ active_foreground = "#282828"
 accent = "#83a598"
 unread = "#b8bb26"
 ```
+
+**Smart tab names:** With `name_mode = "smart"`, a running command
+appears by its executable name (for example `k9s`, `nvim`, `htop`).
+Once it exits, the tab shows the working directory. Paths under your home
+folder are shortened to `~`; if the path is too long for the tab, rst shows
+its final folder name instead. If no metadata is available, it falls back
+to the normal OSC window title and finally the shell name.
+
+Modes: `directory` always prefers the current directory; `title`
+uses the OSC window title; `shell` shows a fixed shell label. Tab names
+are independent per tab, including background sessions. No OS process
+polling or periodically running command is used.
+
+**Refresh the shell integration once after updating** to enable automatic
+working-directory and executable detection:
+
+```sh
+rst --install-shell-integration
+```
+
+Open a new rst window afterwards. The bundled fish, zsh and bash hooks
+emit OSC 7 cwd updates at the prompt and a short OSC 133 executable hint
+when a command starts. Commands run through complex wrappers such as
+`sudo`, `env`, pipelines or an existing tmux session may show the wrapper
+or the OSC title instead of the inner executable; changing directories and
+simple direct commands work without such inference. OSC titles from
+terminal applications remain supported.
 
 These are **Gruvbox-inspired, independently editable** default colors.
 No extra palette dependency is required. The bar occupies exactly one
