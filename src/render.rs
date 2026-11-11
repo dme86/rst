@@ -1608,6 +1608,41 @@ mod tests {
     }
 
     #[test]
+    fn cat_like_output_at_bottom_row_never_stretches_block_cursor() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(2, 2, 2, palette);
+        // A long file leaves the cursor at the bottom after scrollback.
+        terminal.advance(b"a\r\nb\r\nc\r\n");
+        terminal.screen.x = 1;
+        terminal.screen.y = 1;
+        terminal.screen.show_cursor = true;
+        terminal.screen.cursor_blink_on = true;
+        terminal.screen.grid[1][1].bg = 0x334455;
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else {
+            return; // Some CI machines do not have a usable font.
+        };
+        let width = renderer.cell_width * 2 + renderer.padding * 2 + 3;
+        let height = renderer.cell_height * 2 + renderer.padding * 2 + 3;
+        let x = renderer.padding + renderer.cell_width;
+        let y = renderer.padding + renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &terminal.screen, None, None);
+        assert_eq!(pixels[y * width + x], terminal.screen.palette.cursor);
+        assert_eq!(
+            pixels[(y + renderer.cell_height) * width + x],
+            0x334455,
+            "cursor color must end at the exact bottom of its terminal cell",
+        );
+        assert_eq!(
+            pixels[y * width + x + renderer.cell_width],
+            0x334455,
+            "cursor color must end at the exact right edge of its terminal cell",
+        );
+    }
+
+    #[test]
     fn block_cursor_does_not_fill_window_gutters_when_padding_is_nonzero() {
         let mut screen = test_screen();
         screen.show_cursor = true;
