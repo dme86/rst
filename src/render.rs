@@ -7,6 +7,7 @@ use fontdue::{Font, FontSettings, Metrics};
 use crate::{
     config::FontConfig,
     terminal::{Cell, CursorShape, Screen, TextStyle},
+    selection::Selection,
 };
 
 struct Glyph {
@@ -239,7 +240,7 @@ impl Renderer {
         width: usize,
         height: usize,
         screen: &Screen,
-        selection: Option<((usize, usize), (usize, usize))>,
+        selection: Option<Selection>,
     ) {
         paint_backgrounds(
             pixels,
@@ -533,7 +534,7 @@ fn icon_spill(
     row: usize,
     col: usize,
     cell: Cell,
-    selection: Option<((usize, usize), (usize, usize))>,
+    selection: Option<Selection>,
     cell_width: usize,
 ) -> (usize, usize) {
     if !is_nerd_icon(cell.ch) {
@@ -761,7 +762,7 @@ fn paint_backgrounds(
     cell_width: usize,
     cell_height: usize,
     padding: usize,
-    selection: Option<((usize, usize), (usize, usize))>,
+    selection: Option<Selection>,
 ) {
     pixels.fill(if screen.reverse_video {
         screen.palette.foreground
@@ -866,16 +867,9 @@ fn cell_colors(
     row: usize,
     col: usize,
     cell: Cell,
-    selection: Option<((usize, usize), (usize, usize))>,
+    selection: Option<Selection>,
 ) -> (u32, u32) {
-    let selected = selection.is_some_and(|(a, b)| {
-        let (start, end) = if (a.1, a.0) <= (b.1, b.0) {
-            (a, b)
-        } else {
-            (b, a)
-        };
-        (row, col) >= (start.1, start.0) && (row, col) <= (end.1, end.0)
-    });
+    let selected = selection.is_some_and(|selection| selection.contains(screen, col, row));
     let cursor = cursor_is_visible(screen)
         && screen.cursor_style.shape == CursorShape::Block
         && row == screen.y
@@ -1316,6 +1310,56 @@ mod tests {
         // Bar at x=5 and y=4 remains in bounds; underline begins at y=7
         // and is correctly clipped beyond the physical surface.
         assert_eq!(pixels[4 * 7 + 5], screen.palette.cursor);
+    }
+
+
+    #[test]
+    fn rectangular_highlight_matches_only_selected_columns() {
+        let mut screen = test_screen();
+        screen.grid[0][0].ch = 'A';
+        screen.grid[0][1].ch = 'B';
+        screen.grid[1][0].ch = 'C';
+        screen.grid[1][1].ch = 'D';
+        let mut selected = crate::selection::Selection::new(
+            &screen, (1, 0), crate::selection::SelectionSnap::Character, true,
+        );
+        selected.update(&screen, (1, 1), true);
+        assert_eq!(
+            cell_colors(&screen, 0, 1, screen.grid[0][1], Some(selected)).1,
+            screen.palette.selection
+        );
+        assert_eq!(
+            cell_colors(&screen, 1, 1, screen.grid[1][1], Some(selected)).1,
+            screen.palette.selection
+        );
+        assert_eq!(
+            cell_colors(&screen, 1, 0, screen.grid[1][0], Some(selected)).1,
+            screen.palette.background
+        );
+    }
+
+    #[test]
+    fn word_selection_highlight_and_clipboard_share_expanded_geometry() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(12, 2, 0, palette);
+        term.advance(b"hello world");
+        term.screen.show_cursor = false;
+        let selected = crate::selection::Selection::new(
+            &term.screen, (2, 0), crate::selection::SelectionSnap::Word, false,
+        );
+        assert_eq!(selected.text(&term.screen), "hello");
+        for x in 0..5 {
+            assert_eq!(
+                cell_colors(&term.screen, 0, x, term.screen.grid[0][x], Some(selected)).1,
+                term.screen.palette.selection
+            );
+        }
+        assert_eq!(
+            cell_colors(&term.screen, 0, 5, term.screen.grid[0][5], Some(selected)).1,
+            term.screen.palette.background
+        );
     }
 
 }

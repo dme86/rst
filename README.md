@@ -220,6 +220,25 @@ UTF-8 of at most 64 KiB, and the queue is bounded. A remote shell can
 overwrite your host clipboard if this option is enabled.
 Protocol tests: `src/osc_tests.rs` and `src/osc.rs`.
 
+### Text selection (st-style)
+
+- **Left-drag:** Select arbitrary text across rows.
+- **Double-click (within 300 ms):** Snap to a whole word. Like vanilla st,
+  space separates words, while paths such as `/tmp/file.rs` stay intact.
+- **Triple-click (within 600 ms):** Select the whole logical line, including
+  any soft-wrapped continuation rows.
+- **Alt/Option + left-drag:** Select a rectangular column block. Alt can
+  also be pressed or released during a drag to change its geometry.
+- **Shift + mouse** temporarily bypasses mouse reporting when a TUI such
+  as tmux or Neovim owns the mouse. Use Shift+Alt to force rectangle selection.
+
+Selections handle double-width Unicode cells, soft wraps and scrollback.
+Normal selection joins soft-wrapped rows without inserting extra newlines;
+rectangular selection copies the chosen column range from each row.
+Resizing, changing the scrollback viewport or switching alternate screens
+invalidates stale selections. Press **Cmd+C** on macOS (or the platform's
+copy shortcut) to copy, or set `[clipboard] copy_on_select = true`.
+
 ### Mouse reporting
 
 rst implements upstream st's legacy X10 (CSI ? 9 h), button tracking

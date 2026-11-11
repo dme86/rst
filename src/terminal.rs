@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Parser, Perform};
 
-use crate::{config::Colors, mouse::MouseTracking, osc};
+use crate::{config::Colors, mouse::MouseTracking, osc, selection::Selection};
 
 pub const DEFAULT_TITLE: &str = "rst — Rust Simple Terminal";
 
@@ -99,6 +99,8 @@ pub struct Cell {
     pub fg_source: ColorSource,
     pub bg_source: ColorSource,
     pub style: TextStyle,
+    /// Set on the final display cell when the next printable glyph soft-wraps.
+    pub wrapped: bool,
 }
 
 #[derive(Clone)]
@@ -273,6 +275,7 @@ impl Screen {
             fg_source: ColorSource::DefaultForeground,
             bg_source: ColorSource::DefaultBackground,
             style: TextStyle::default(),
+            wrapped: false,
         };
         Self {
             cols,
@@ -433,6 +436,7 @@ impl Screen {
             // Erased cells retain BCE colors, not the formatting of the
             // glyph that was previously at this location.
             style: TextStyle::default(),
+            wrapped: false,
         }
     }
 
@@ -539,8 +543,21 @@ impl Screen {
             return;
         }
         let blank = self.blank();
+        let width_changed = cols != self.cols;
         for row in &mut self.grid {
             row.resize(cols, blank);
+            if width_changed {
+                for cell in row { cell.wrapped = false; }
+            }
+        }
+        // Scrollback rows are also addressable by display_row(). Keep them
+        // exactly as wide as the viewport to avoid out-of-bounds selection
+        // and rendering after a terminal resize.
+        for row in &mut self.history {
+            row.resize(cols, blank);
+            if width_changed {
+                for cell in row { cell.wrapped = false; }
+            }
         }
         if rows > self.rows {
             self.grid.extend(vec![vec![blank; cols]; rows - self.rows]);
@@ -550,6 +567,9 @@ impl Screen {
         if let Some(saved) = &mut self.alternate {
             for row in &mut saved.grid {
                 row.resize(cols, blank);
+                if width_changed {
+                    for cell in row { cell.wrapped = false; }
+                }
             }
             saved.grid.resize(rows, vec![blank; cols]);
             saved.x = saved.x.min(cols - 1);
@@ -591,6 +611,7 @@ impl Screen {
         // painting the last column (the delayed-wrap behavior from st).
         if self.wrap_pending {
             if self.auto_wrap {
+                self.grid[self.y][self.cols - 1].wrapped = true;
                 self.x = 0;
                 self.linefeed();
             }
@@ -598,6 +619,7 @@ impl Screen {
         }
         if self.x + width > self.cols {
             if self.auto_wrap {
+                self.grid[self.y][self.cols - 1].wrapped = true;
                 self.x = 0;
                 self.linefeed();
             } else {
@@ -622,6 +644,7 @@ impl Screen {
             fg_source,
             bg_source,
             style: self.style,
+            wrapped: false,
         };
         if width == 2 && self.x + 1 < self.cols {
             self.grid[self.y][self.x + 1] = Cell {
@@ -632,6 +655,7 @@ impl Screen {
                 fg_source,
                 bg_source,
                 style: self.style,
+                wrapped: false,
             };
         }
         if self.x + width == self.cols {
@@ -946,30 +970,8 @@ impl Screen {
         std::mem::take(&mut self.replies)
     }
 
-    pub fn selected_text(&self, start: (usize, usize), end: (usize, usize)) -> String {
-        let (mut start, mut end) = (start, end);
-        if (start.1, start.0) > (end.1, end.0) {
-            std::mem::swap(&mut start, &mut end);
-        }
-        let mut out = String::new();
-        for y in start.1..=end.1.min(self.rows - 1) {
-            if y >= self.rows {
-                break;
-            }
-            let first = if y == start.1 { start.0 } else { 0 };
-            let last = if y == end.1 { end.0 + 1 } else { self.cols };
-            let line = self.display_row(y);
-            let value = line[first.min(self.cols)..last.min(self.cols)]
-                .iter()
-                .filter(|cell| cell.width != 0)
-                .map(|cell| cell.ch)
-                .collect::<String>();
-            out.push_str(value.trim_end());
-            if y != end.1 {
-                out.push('\n');
-            }
-        }
-        out
+    pub fn selected_text(&self, selection: &Selection) -> String {
+        selection.text(self)
     }
 
     /// DECRQM (CSI ? Ps $ p / CSI Ps $ p): report the current state
@@ -1303,6 +1305,7 @@ impl Perform for Screen {
                     fg_source,
                     bg_source,
                     style: self.style,
+                    wrapped: false,
                 };
                 for row in &mut self.grid {
                     row.fill(cell);

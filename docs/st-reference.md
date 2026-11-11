@@ -35,6 +35,20 @@ vendor or translate upstream C source.
   precedence. On the primary screen Shift+PageUp/Down scrolls history;
   alternate-screen apps receive these keys.
 
+## Text selection (implemented)
+
+- From upstream st's `selstart`, `selextend`, `selsnap`, `getsel` and x.c's
+  multi-click handling: 300 ms word snap, 600 ms line snap, Alt-drag
+  rectangular geometry, and Shift-forced local selection during reporting.
+- Dedicated `src/selection.rs` stores selection geometry and click timing;
+  `src/render.rs` and clipboard extraction use the same normalized bounds.
+- Soft-wrap flags on cells let word/line selection span logical lines and
+  suppress unwanted clipboard newlines. Wide Unicode dummy cells are
+  normalized to their visible glyph, including rectangle intersections.
+- Scrollback history is kept at the current viewport width on resize.
+- Protocol-independent regression vectors: `src/selection_tests.rs`,
+  with additional pixel-color selection tests in `src/render.rs`.
+
 ## Mouse reporting (implemented)
 
 - DEC 9 (X10), 1000 (press/release), 1002 (pressed-button motion),

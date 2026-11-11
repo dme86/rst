@@ -4,6 +4,7 @@ mod mouse;
 mod osc;
 mod pty;
 mod render;
+mod selection;
 mod terminal;
 
 use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};
@@ -27,6 +28,7 @@ use crate::{
     mouse::MouseReporter,
     pty::{PtySession, UserEvent},
     render::Renderer,
+    selection::{ClickTracker, Selection},
     terminal::{CursorShape, CursorStyle, Palette, Terminal},
 };
 
@@ -42,7 +44,8 @@ struct App {
     modifiers: ModifiersState,
     mouse: (f64, f64),
     mouse_reporter: MouseReporter,
-    selection: Option<((usize, usize), (usize, usize))>,
+    selection: Option<Selection>,
+    clicks: ClickTracker,
     selecting: bool,
     next_cursor_blink: Instant,
     next_text_blink: Instant,
@@ -62,6 +65,9 @@ impl App {
             .max(1);
         if (cols, rows) != (self.terminal.screen.cols, self.terminal.screen.rows) {
             self.terminal.screen.resize(cols, rows);
+            self.selection = None;
+            self.selecting = false;
+            self.clicks.reset();
             self.pty
                 .resize(cols, rows, renderer.cell_width, renderer.cell_height);
         }
@@ -104,6 +110,16 @@ impl App {
         }
     }
 
+    fn scroll_scrollback(&mut self, lines: i32) {
+        let old_offset = self.terminal.screen.view_offset;
+        self.terminal.screen.scroll_view(lines);
+        if self.terminal.screen.view_offset != old_offset {
+            self.selection = None;
+            self.selecting = false;
+            self.clicks.reset();
+        }
+    }
+
     fn cell_at_mouse(&self) -> (usize, usize) {
         let Some(renderer) = &self.renderer else {
             return (0, 0);
@@ -122,8 +138,8 @@ impl App {
         if !self.config.clipboard.enabled {
             return;
         }
-        if let Some((start, end)) = self.selection {
-            let value = self.terminal.screen.selected_text(start, end);
+        if let Some(selection) = self.selection {
+            let value = self.terminal.screen.selected_text(&selection);
             if !value.is_empty() {
                 match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(value)) {
                     Ok(()) => {}
@@ -239,7 +255,7 @@ impl App {
                 _ => None,
             };
             if let Some(lines) = scroll {
-                self.terminal.screen.scroll_view(lines);
+                self.scroll_scrollback(lines);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -461,12 +477,13 @@ impl ApplicationHandler<UserEvent> for App {
                     // A mouse release may be lost when the window loses focus.
                     self.mouse_reporter.reset();
                     self.selecting = false;
+                    self.clicks.reset();
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
                 let tracking = self.terminal.screen.mouse_tracking;
-                if tracking.enabled() && !self.modifiers.shift_key() {
+                if tracking.enabled() && !self.modifiers.shift_key() && !self.selecting {
                     let at = self.cell_at_mouse();
                     let report = self.mouse_reporter.motion(
                         at,
@@ -484,8 +501,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // ordinary local text selection even when tmux tracks the mouse.
                 if self.selecting {
                     let at = self.cell_at_mouse();
-                    if let Some((start, _)) = self.selection {
-                        self.selection = Some((start, at));
+                    if let Some(ref mut selection) = self.selection {
+                        selection.update(&self.terminal.screen, at, self.modifiers.alt_key());
                     }
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -495,19 +512,31 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput { button, state, .. } => {
                 let tracking = self.terminal.screen.mouse_tracking;
                 let at = self.cell_at_mouse();
+                // Once Shift begins a local selection inside a TUI, finish
+                // that gesture locally even if Shift is released before the
+                // mouse button. Otherwise a stray mouse-release escapes to
+                // the child application with no matching button press.
+                let finishing_local = self.selecting
+                    && button == MouseButton::Left
+                    && state == ElementState::Released;
+                let report_mods = if finishing_local {
+                    self.modifiers | ModifiersState::SHIFT
+                } else {
+                    self.modifiers
+                };
                 let report = self.mouse_reporter.button(
                     button,
                     state,
                     at,
                     tracking,
                     self.terminal.screen.mouse_sgr,
-                    self.modifiers,
+                    report_mods,
                 );
                 if !report.is_empty() {
                     self.pty.write(&report);
                 }
 
-                if tracking.enabled() && !self.modifiers.shift_key() {
+                if tracking.enabled() && !self.modifiers.shift_key() && !finishing_local {
                     // In reporting mode the child owns the click, not rst's
                     // clipboard selection. A Shift-forced selection can
                     // still be finished after the modifier is released.
@@ -522,9 +551,22 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if button == MouseButton::Left {
                     if state == ElementState::Pressed {
-                        self.selection = Some((at, at));
+                        let snap = self.clicks.press(
+                            Instant::now(), at, self.modifiers.alt_key(),
+                        );
+                        self.selection = Some(Selection::new(
+                            &self.terminal.screen,
+                            at,
+                            snap,
+                            self.modifiers.alt_key(),
+                        ));
                         self.selecting = true;
                     } else if self.selecting {
+                        if let Some(ref mut selection) = self.selection {
+                            selection.update(
+                                &self.terminal.screen, at, self.modifiers.alt_key(),
+                            );
+                        }
                         self.selecting = false;
                         if self.config.clipboard.copy_on_select {
                             self.copy_selection();
@@ -568,7 +610,7 @@ impl ApplicationHandler<UserEvent> for App {
                         (pos.y / height).round() as i32
                     }
                 };
-                self.terminal.screen.scroll_view(lines);
+                self.scroll_scrollback(lines);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -581,9 +623,18 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Output(bytes) => {
                 let previous_mouse_mode = self.terminal.screen.mouse_tracking;
+                let previous_alt_screen = self.terminal.screen.in_alternate_screen();
+                let previous_view_offset = self.terminal.screen.view_offset;
                 let previous_title = self.terminal.screen.title.clone();
                 let previous_cursor_style = self.terminal.screen.cursor_style;
                 self.terminal.advance(&bytes);
+                if previous_alt_screen != self.terminal.screen.in_alternate_screen()
+                    || previous_view_offset != self.terminal.screen.view_offset
+                {
+                    self.selection = None;
+                    self.selecting = false;
+                    self.clicks.reset();
+                }
                 if self.terminal.screen.cursor_style != previous_cursor_style {
                     self.next_cursor_blink = Instant::now()
                         + Duration::from_millis(self.config.cursor.blink_interval_ms);
@@ -609,6 +660,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // TUI enabling/disabling DEC mouse reporting.
                     self.mouse_reporter.reset();
                     self.selecting = false;
+                    self.clicks.reset();
                     if self.terminal.screen.mouse_tracking.enabled() {
                         // An old local selection must not overlay a TUI that
                         // now owns the mouse.
@@ -675,6 +727,7 @@ fn main() -> Result<()> {
         mouse: (0.0, 0.0),
         mouse_reporter: MouseReporter::default(),
         selection: None,
+        clicks: ClickTracker::default(),
         selecting: false,
         next_cursor_blink: Instant::now()
             + Duration::from_millis(config_blink_ms),
