@@ -131,6 +131,22 @@ vendor or translate upstream C source.
 - Soft reset (DECSTR) and full reset (RIS) restore the configured cursor.
 - Regression vectors in src/cursor_tests.rs plus pixel tests in src/render.rs.
 
+## DEC character sets (implemented)
+
+- Match `st.c::tsetchar`'s complete `vt100_0` ASCII-to-Unicode mapping:
+  box drawing, arrows, shading and legacy symbols, preserving ASCII
+  characters and non-ASCII UTF-8 outside the translation table.
+- Like `st.c::tdeftran`, designate only `0` (DEC graphics) and `B` (ASCII)
+  into G0/G1/G2/G3 with `ESC (`, `ESC )`, `ESC *` and `ESC +`.
+- Invoke G1/G0 with SO/SI (0x0e/0x0f); invoke G2/G3 with ESC n/o.
+  Designations are global across primary/alternate screen changes.
+- SGR does not reset charset invocation. DECSTR and RIS restore all
+  registers to ASCII and invoke G0. Unknown designators are ignored.
+- Translation happens before glyph-width measurement, so the grid,
+  selection and clipboard all contain the visible Unicode character.
+- Table tests in src/charset.rs; 14 streamed-PTY cases in
+  src/charset_tests.rs for registration, shifts, Unicode, wrap and reset.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
