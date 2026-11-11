@@ -250,6 +250,7 @@ pub struct Screen {
     saved_primary_cursor: Option<CursorSnapshot>,
     alternate: Option<SavedScreen>,
     replies: Vec<u8>,
+    pending_bells: u8,
 }
 
 impl Screen {
@@ -338,6 +339,7 @@ impl Screen {
             saved_primary_cursor: None,
             alternate: None,
             replies: Vec::new(),
+            pending_bells: 0,
         }
     }
 
@@ -976,6 +978,12 @@ impl Screen {
         }
     }
 
+    /// Drain pending BEL (0x07) notifications. Keep parser state separate
+    /// from UI sound and urgency handling, and bound flood output.
+    pub fn take_bells(&mut self) -> u8 {
+        std::mem::take(&mut self.pending_bells)
+    }
+
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
     }
@@ -1137,6 +1145,7 @@ impl Perform for Screen {
 
     fn execute(&mut self, byte: u8) {
         match byte {
+            0x07 => self.pending_bells = self.pending_bells.saturating_add(1),
             0x0e => self.active_charset = 1, // SO / LS1: invoke G1
             0x0f => self.active_charset = 0, // SI / LS0: invoke G0
             b'\r' => {
