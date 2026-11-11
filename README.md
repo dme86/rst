@@ -208,8 +208,49 @@ no visible text requires animation.
 
 For a quick check: `printf '\\033[1;3;4mBold italic underlined\\033[0m\\n'`.
 The corresponding state and rendering tests are in `src/terminal.rs` and
-`src/render.rs`. Extended SGR underline styles/colors and font ligatures are
-outside vanilla st parity and remain future work.
+`src/render.rs`. Extended SGR underline styles/colors remain outside vanilla
+st parity; optional font ligatures are provided through Rustybuzz.
+
+### OpenType shaping and programming ligatures
+
+`rst` now uses **Rustybuzz** (a pure-Rust HarfBuzz-compatible OpenType
+shaper) for contextual scripts and programming ligatures, while keeping
+`fontdue` for glyph rasterization. No native HarfBuzz/FreeType dependency
+or extra OS libraries are required on macOS or Wayland.
+
+- Shapes uniform text runs using the font's **GSUB/GPOS** features:
+  contextual substitutions, joining and mark placement, plus common
+  programming ligatures such as `=>`, `->`, `!=`, `fi` and `ffi` when
+  provided by the active font. Fonts without those glyph substitutions
+  continue to display ordinary characters.
+- Stays **fixed-width**: terminal cell placement, cursor, colors, SGR,
+  scrolling and selection are not modified by the shaping engine.
+  Shaping stops at font, selection, cursor or formatting boundaries.
+- Retains up to eight combining Unicode scalars per terminal cell,
+  including diacritics and many emoji ZWJ sequences, through scrollback,
+  resize and clipboard copy.
+- IME Preedit now shapes contiguous candidate runs rather than drawing
+  each individual scalar. The final committed UTF-8 text is unchanged.
+- Reuses the exact same font collection face for Rustybuzz and fontdue.
+  Cached shaped runs and glyph bitmaps are discarded on font zoom.
+
+Control optional programming ligatures:
+
+```toml
+[font]
+ligatures = true  # false disables discretionary/contextual ligatures
+```
+
+**Limits:** Complete bidirectional paragraph layout/reordering is not
+implemented; characters remain in their terminal-grid columns. The
+`fontdue` bitmap path does not render multicolor emoji glyph layers,
+and grapheme overflow beyond eight extra scalars is bounded. Complex
+script appearance depends on the installed fallback font's OpenType
+tables. Ligatures that cross SGR/selection boundaries are deliberately
+disabled to preserve TUI layout. Use a suitable font for Arabic, Indic
+and other complex scripts.
+
+Tests: `src/shaping.rs`, `src/grapheme_tests.rs` and `src/render.rs`.
 
 ### Native IME and composition preview (macOS / Wayland)
 
@@ -233,11 +274,11 @@ rst's macOS/Wayland-only backends.
 - Ordinary function keys, Ctrl/Alt combinations and window shortcuts
   still use the existing keyboard encoder outside composition.
 
-**Current renderer limitation:** `fontdue` rasterizes individual glyphs;
-complex-script shaping, advanced ligatures and joined emoji appearance are
-not yet equivalent to a HarfBuzz-based text renderer. The OS handles
-candidate selection and text composition; only the final committed text
-is written to the terminal application's PTY.
+**Rendering:** Rustybuzz now shapes joined/contexual glyph runs before
+`fontdue` rasterizes the selected glyph IDs. Native candidate selection
+is handled by the OS; only the final committed text is written to the
+terminal application's PTY. Full bidirectional layout and color emoji
+rendering remain outside the current renderer.
 
 Regression tests: `src/ime_tests.rs` and preedit overlay tests in
 `src/render.rs`. Manual validation should cover macOS Japanese/Korean/
@@ -372,7 +413,7 @@ To inspect which font families rst found and identify missing glyph codepoints, 
 
 One window and one PTY, with an owned terminal grid, ANSI parser, basic VT operations, 24-bit color, font fallback, bounded scrollback and native copy/paste. No tabs, shell integration, Electron, GTK, X11, or XWayland. On Linux, the windowing backend is **Wayland-only**.
 
-This is a work-in-progress: extended VT modes, complex grapheme shaping, complete alt-screen compatibility, font ligatures and richer OSC security prompts remain to be implemented/tested. Linux clipboard integration currently relies on compositor data-control support; the macOS native clipboard is the primary first-run target.
+This is a work-in-progress: extended VT modes, full bidirectional layout, color emoji rasterization, complete alt-screen compatibility and richer OSC security prompts remain to be implemented/tested. Linux clipboard integration currently relies on compositor data-control support; the macOS native clipboard is the primary first-run target.
 
 ## Inspiration and attribution
 
