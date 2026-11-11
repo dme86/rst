@@ -1437,6 +1437,10 @@ mod cursor_tests;
 mod charset_tests;
 
 #[cfg(test)]
+#[path = "attention_tests.rs"]
+mod attention_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
