@@ -2450,6 +2450,44 @@ mod tests {
 
 
     #[test]
+    fn optional_gruvbox_bar_is_drawn_outside_terminal_cells() {
+        let mut config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(40, 4, 0, palette);
+        term.advance(b"shell output");
+        let width = term.screen.cols * renderer.cell_width;
+        let bar_h = crate::tabs::bar_height(renderer.cell_height, true);
+        let height = term.screen.rows * renderer.cell_height + bar_h;
+        let items = vec![
+            crate::tabs::TabDisplay {
+                title: "fish".into(), active: true, unread: false,
+            },
+            crate::tabs::TabDisplay {
+                title: "logs".into(), active: false, unread: true,
+            },
+        ];
+        let mut pixels = vec![0xdeadbeefu32; width * height];
+        let original = pixels.clone();
+        renderer.draw_tab_bar(&mut pixels, width, height, &term.screen, &items, 0, &config.tabs);
+        assert_eq!(pixels, original, "disabled bar should not paint anything");
+        config.tabs.enabled = true;
+        renderer.draw_tab_bar(&mut pixels, width, height, &term.screen, &items, 0, &config.tabs);
+        assert_ne!(pixels, original);
+        assert_eq!(pixels[0], crate::tabs::parse_color("#282828").unwrap());
+        assert_eq!(term.screen.grid[0][0].ch, 's');
+        assert_eq!(term.screen.history.len(), 0);
+
+        config.tabs.position = "bottom".into();
+        let mut bottom = original.clone();
+        renderer.draw_tab_bar(&mut bottom, width, height, &term.screen, &items, 1, &config.tabs);
+        assert_eq!(bottom[0], original[0], "bottom bar must not paint the top row");
+        assert_eq!(bottom[(height - 1) * width],
+                   crate::tabs::parse_color("#282828").unwrap());
+    }
+
+    #[test]
     fn help_popup_draws_over_pixels_without_mutating_terminal_cells() {
         let config: crate::config::Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
