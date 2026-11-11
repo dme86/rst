@@ -6,6 +6,7 @@ use fontdue::{Font, FontSettings, Metrics};
 
 use crate::{
     config::FontConfig,
+    ime::{self, Preedit},
     terminal::{Cell, CursorShape, Screen, TextStyle},
     selection::Selection,
 };
@@ -241,6 +242,7 @@ impl Renderer {
         height: usize,
         screen: &Screen,
         selection: Option<Selection>,
+        preedit: Option<&Preedit>,
     ) {
         paint_backgrounds(
             pixels,
@@ -316,6 +318,65 @@ impl Renderer {
         // the completed glyphs. Otherwise the text can hide the thin stroke.
         paint_cursor(pixels, width, height, screen,
                      self.cell_width, self.cell_height, self.padding);
+        if let Some(preedit) = preedit {
+            self.draw_preedit(pixels, width, height, screen, preedit);
+        }
+    }
+
+    /// Render composition above the already drawn terminal grid. No cell
+    /// or scrollback mutation occurs until winit emits Ime::Commit.
+    fn draw_preedit(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        screen: &Screen,
+        preedit: &Preedit,
+    ) {
+        if screen.view_offset != 0 {
+            return;
+        }
+        let layout = ime::layout(preedit, screen.cols, screen.rows, (screen.x, screen.y));
+        let cell_w = self.cell_width;
+        let cell_h = self.cell_height;
+        let padding = self.padding;
+        let ascent = self.ascent;
+        let font_size = self.font_size;
+        for glyph in layout.glyphs {
+            let x = padding.saturating_add(glyph.col.saturating_mul(cell_w));
+            let y = padding.saturating_add(glyph.row.saturating_mul(cell_h));
+            let cell_width = glyph.cells * cell_w;
+            let bg = if glyph.selected { screen.palette.cursor }
+                else { screen.palette.selection };
+            let fg = if glyph.selected { screen.palette.background }
+                else { screen.palette.foreground };
+            rect(pixels, width, height, x, y, cell_width, cell_h, bg);
+
+            // Copy the existing Cell layout rather than rebuilding all of
+            // its color-provenance fields. Only the temporary overlay is
+            // changed; the actual terminal buffer stays untouched.
+            if let Some(&original) = screen.display_row(glyph.row).get(glyph.col) {
+                let mut cell = original;
+                cell.ch = glyph.text.chars().next().unwrap_or(' ');
+                cell.width = glyph.cells as u8;
+                cell.style = TextStyle::UNDERLINE;
+                if cell.ch != ' ' && !cell.ch.is_control() {
+                    self.draw_glyph(pixels, width, height, x, y, cell, fg, (0, 0));
+                }
+                // A thin underline indicates ongoing, uncommitted input.
+                paint_decorations(
+                    pixels, width, height, x, y,
+                    cell_width, cell_h, ascent, font_size,
+                    TextStyle::UNDERLINE, fg,
+                );
+            }
+        }
+        if let Some((col, row)) = layout.caret {
+            let x = padding.saturating_add(col.saturating_mul(cell_w));
+            let y = padding.saturating_add(row.saturating_mul(cell_h));
+            rect(pixels, width, height, x, y, 2.min(cell_w), cell_h,
+                 screen.palette.cursor);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
