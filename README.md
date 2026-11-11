@@ -40,9 +40,12 @@ running command as well as the last completed command.
 | Action | macOS | Wayland |
 | --- | --- | --- |
 | Copy last command output | **Cmd+Shift+O** | **Ctrl+Shift+O** |
+| Open recent output URLs | **Cmd+Shift+U** | **Ctrl+Shift+U** |
 | Show/close keyboard help popup | **F1** or **Cmd+Shift+H** | **F1** or **Ctrl+Shift+H** |
 | Close help | **Esc** | **Esc** |
 | Scroll help | Arrow keys, PgUp/PgDn, mouse wheel | Same |
+| Browse URLs | **j/k**, arrows, PgUp/PgDn, Home/End | Same |
+| Open selected URL / close palette | **Enter** / **Esc** | Same |
 
 The help popup is drawn inside rst. It lists clipboard, font, selection,
 scrollback, shell integration and help shortcuts, with scrolling on small
@@ -96,6 +99,42 @@ If the cap is reached, rst reports the overflow **rather than silently
 copying a truncated command**. Only text is copied, never raw control
 sequences. Clipboard writes require `[clipboard].enabled = true` but do
 not require OSC 52 clipboard write permissions.
+
+### Browse recent command-output URLs
+
+Press **Cmd+Shift+U** on macOS or **Ctrl+Shift+U** on Wayland to open
+rst's in-terminal **Links** palette. It extracts HTTP/HTTPS URLs from the
+last **20 completed command outputs** (plus the current running command),
+deduplicates them, and lists the newest matches first. Browse using
+**j/k**, **Up/Down**, **PageUp/PageDown** or **Home/End**. Press **Enter**
+to open the selected URL in your OS default browser (macOS `open`,
+Wayland `xdg-open`), or **Esc** to close without opening anything.
+You can also move through the list with the mouse wheel.
+
+No URLs open automatically, and rst never feeds palette keys to the shell.
+The overlay is native to rst's renderer: it does not alter terminal content,
+the cursor, selection, or scrollback. Only HTTP(S) URLs are accepted.
+Browser launching uses direct process arguments, **not a shell**.
+
+The URL history is deliberately compact and memory-bounded: rst keeps up
+to 64 distinct URLs per command and shows up to 256 recent unique URLs
+in the picker, without retaining 20 copies of the command logs. Older
+commands are evicted as new OSC 133 outputs complete. URLs from an
+individual command that exceeded `[command_output].max_megabytes` are
+not indexed (the existing copy safety limit still applies). Links in
+an actively running command are available before it completes.
+
+Change the history depth in `~/.config/rst/config.toml`:
+
+```toml
+[url_picker]
+recent_outputs = 20 # 1..100
+```
+
+As with copying the last output, **OSC 133 shell integration is required**.
+Install it using `make shell-integration` or
+`rst --install-shell-integration`, and launch a new shell. The picker
+is session-local; URL history is not written to disk.
 
 ### Default colors
 

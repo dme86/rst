@@ -43,6 +43,11 @@ visual = true
 # Per-command capture cap, independent from [scrollback] lines (1-128 MiB).
 max_megabytes = 32
 
+[url_picker]
+# Inspect the latest N completed OSC 133 outputs (1-100).
+# Only extracted links are retained for older commands, not full logs.
+recent_outputs = 20
+
 [clipboard]
 enabled = true
 copy_on_select = false

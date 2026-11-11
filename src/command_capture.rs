@@ -6,6 +6,10 @@
 //! Keep only the latest finished command and the active command, each capped
 //! independently to avoid unbounded output from logs.
 
+use std::collections::{HashSet, VecDeque};
+
+use crate::url_picker::{extract_urls, DEFAULT_OUTPUT_HISTORY, MAX_TOTAL_URLS, MAX_URLS_PER_OUTPUT};
+
 pub const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +155,9 @@ pub struct CommandCapture {
     max_bytes: usize,
     saw_markers: bool,
     next_id: u32,
+    // One compact URL list per recent completed command, not its full text.
+    url_history: VecDeque<Vec<String>>,
+    url_history_limit: usize,
 }
 
 impl Default for CommandCapture {
@@ -167,7 +174,15 @@ impl CommandCapture {
             max_bytes: max_bytes.max(1),
             saw_markers: false,
             next_id: 0,
+            url_history: VecDeque::new(),
+            url_history_limit: DEFAULT_OUTPUT_HISTORY,
         }
+    }
+
+    pub fn with_url_history(max_bytes: usize, outputs: usize) -> Self {
+        let mut capture = Self::new(max_bytes);
+        capture.url_history_limit = outputs.max(1);
+        capture
     }
 
     pub fn saw_markers(&self) -> bool {
@@ -209,6 +224,15 @@ impl CommandCapture {
 
     fn finish(&mut self) {
         if let Some(active) = self.active.take() {
+            // The command may be 32 MiB; only keep its bounded URL list.
+            // Empty outputs still count toward the last N commands.
+            let links = active.content().map(|text| {
+                extract_urls(&text, MAX_URLS_PER_OUTPUT)
+            }).unwrap_or_default();
+            self.url_history.push_back(links);
+            while self.url_history.len() > self.url_history_limit {
+                self.url_history.pop_front();
+            }
             self.completed = Some(active);
         }
     }
@@ -233,6 +257,28 @@ impl CommandCapture {
 
     /// Copy an active command if it already produced output, otherwise
     /// prefer the most recent completed command. Never silently truncate.
+    /// Unique links, newest first, from the currently running command
+    /// and the last N completed command outputs. Does not depend on scrollback.
+    pub fn recent_urls(&self) -> Vec<String> {
+        let mut results = Vec::new();
+        let mut seen = HashSet::new();
+        let active_links = self.active.as_ref()
+            .and_then(|active| active.content().ok())
+            .map(|text| extract_urls(&text, MAX_URLS_PER_OUTPUT))
+            .unwrap_or_default();
+        for links in std::iter::once(&active_links).chain(self.url_history.iter().rev()) {
+            for url in links.iter().rev() {
+                if seen.insert(url.clone()) {
+                    results.push(url.clone());
+                    if results.len() == MAX_TOTAL_URLS {
+                        return results;
+                    }
+                }
+            }
+        }
+        results
+    }
+
     pub fn latest_output(&self) -> Result<String, CopyError> {
         self.latest_output_with_id().map(|(text, _)| text)
     }
@@ -260,6 +306,46 @@ impl CommandCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urls_are_deduplicated_newest_first_across_recent_commands() {
+        let mut cap = CommandCapture::with_url_history(DEFAULT_MAX_BYTES, 2);
+        cap.marker(b'C');
+        for ch in "https://old.example https://same.example".chars() { cap.print(ch); }
+        cap.marker(b'D');
+        cap.marker(b'C');
+        for ch in "https://new.example https://same.example".chars() { cap.print(ch); }
+        cap.marker(b'D');
+        assert_eq!(cap.recent_urls(), vec![
+            "https://same.example", "https://new.example", "https://old.example",
+        ]);
+        cap.marker(b'C');
+        for ch in "no links".chars() { cap.print(ch); }
+        cap.marker(b'D');
+        assert_eq!(cap.recent_urls(), vec![
+            "https://same.example", "https://new.example",
+        ]);
+    }
+
+    #[test]
+    fn running_links_are_visible_and_scrollback_is_not_required() {
+        let mut cap = CommandCapture::default();
+        cap.marker(b'C');
+        for ch in "https://live.example/now".chars() { cap.print(ch); }
+        assert_eq!(cap.recent_urls(), vec!["https://live.example/now"]);
+        cap.marker(b'D');
+        assert_eq!(cap.recent_urls(), vec!["https://live.example/now"]);
+    }
+
+    #[test]
+    fn overlarge_outputs_do_not_store_partial_urls() {
+        let mut cap = CommandCapture::with_url_history(32, 3);
+        cap.marker(b'C');
+        for ch in "https://a.example/12345678900000000".chars() { cap.print(ch); }
+        cap.marker(b'D');
+        assert!(cap.recent_urls().is_empty());
+    }
+
 
     #[test]
     fn markers_separate_prompt_input_and_command_output() {

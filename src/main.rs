@@ -16,6 +16,7 @@ mod selection;
 mod shell_integration;
 mod shaping;
 mod terminal;
+mod url_picker;
 
 use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};
 
@@ -44,6 +45,7 @@ use crate::{
     render::Renderer,
     selection::{ClickTracker, Selection},
     terminal::{CursorShape, CursorStyle, Palette, Terminal},
+    url_picker::{self, UrlPicker},
 };
 
 struct App {
@@ -69,6 +71,7 @@ struct App {
     bell_flash_until: Option<Instant>,
     help_open: bool,
     help_scroll: usize,
+    url_picker: Option<UrlPicker>,
     toast: Option<CopyNotice>,
     next_toast_frame: Option<Instant>,
 }
@@ -171,6 +174,12 @@ impl App {
             renderer.draw_help_overlay(
                 &mut buffer, size.width as usize, size.height as usize,
                 &self.terminal.screen, self.help_scroll, cfg!(target_os = "macos"),
+            );
+        }
+        if let Some(picker) = &self.url_picker {
+            renderer.draw_url_picker_overlay(
+                &mut buffer, size.width as usize, size.height as usize,
+                &self.terminal.screen, picker, self.config.url_picker.recent_outputs,
             );
         }
         if let Some(notice) = &self.toast {
@@ -333,6 +342,72 @@ impl App {
         }
     }
 
+    fn toggle_url_picker(&mut self) {
+        if self.url_picker.is_some() {
+            self.url_picker = None;
+        } else if !self.terminal.screen.command_capture.saw_markers() {
+            self.notify("No shell markers: run rst --install-shell-integration");
+            return;
+        } else {
+            self.url_picker = Some(UrlPicker::new(
+                self.terminal.screen.command_capture.recent_urls(),
+            ));
+        }
+        self.ime.clear();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn handle_url_picker_key(&mut self, key: &Key<&str>) {
+        if matches!(key, Key::Named(NamedKey::Escape)) {
+            self.toggle_url_picker();
+            return;
+        }
+        if matches!(key, Key::Named(NamedKey::Enter)) {
+            if let Some(url) = self.url_picker.as_ref()
+                .and_then(|picker| picker.selected_url()).map(str::to_owned)
+            {
+                // Never involve a shell; do not auto-open untrusted log data.
+                // Only the user explicitly pressing Enter launches a link.
+                let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                match std::process::Command::new(program)
+                    .arg(&url)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    Ok(_) => self.toggle_url_picker(),
+                    Err(err) => {
+                        eprintln!("rst: open link: {err}");
+                        self.notify(format!("Could not launch browser: {err}"));
+                    }
+                }
+            }
+            return;
+        }
+        let visible = url_picker::visible_rows(self.terminal.screen.rows);
+        if let Some(picker) = self.url_picker.as_mut() {
+            match key {
+                Key::Character(value) if value.eq_ignore_ascii_case("j") =>
+                    picker.move_by(1, visible),
+                Key::Character(value) if value.eq_ignore_ascii_case("k") =>
+                    picker.move_by(-1, visible),
+                Key::Named(NamedKey::ArrowDown) => picker.move_by(1, visible),
+                Key::Named(NamedKey::ArrowUp) => picker.move_by(-1, visible),
+                Key::Named(NamedKey::PageDown) => picker.move_by(visible as i32, visible),
+                Key::Named(NamedKey::PageUp) => picker.move_by(-(visible as i32), visible),
+                Key::Named(NamedKey::Home) => picker.select_first(),
+                Key::Named(NamedKey::End) => picker.select_last(visible),
+                _ => {}
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn toggle_help(&mut self) {
         self.help_open = !self.help_open;
         self.help_scroll = 0;
@@ -386,6 +461,19 @@ impl App {
             return;
         }
         let key = event.logical_key.as_ref();
+        if self.url_picker.is_some() {
+            if matches!(key, Key::Named(NamedKey::F1))
+                || command_shortcut(&key, self.modifiers, cfg!(target_os = "macos"), "h")
+            {
+                self.url_picker = None;
+                self.toggle_help();
+            } else if command_shortcut(&key, self.modifiers, cfg!(target_os = "macos"), "u") {
+                self.toggle_url_picker();
+            } else {
+                self.handle_url_picker_key(&key);
+            }
+            return;
+        }
         if matches!(key, Key::Named(NamedKey::F1))
             || command_shortcut(&key, self.modifiers, cfg!(target_os = "macos"), "h")
         {
@@ -402,6 +490,10 @@ impl App {
         }
         if command_shortcut(&key, self.modifiers, cfg!(target_os = "macos"), "o") {
             self.copy_last_output();
+            return;
+        }
+        if command_shortcut(&key, self.modifiers, cfg!(target_os = "macos"), "u") {
+            self.toggle_url_picker();
             return;
         }
         // Typing wakes the cursor and restarts the blink interval.
@@ -717,7 +809,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(event),
             WindowEvent::Ime(event) => {
-                if self.help_open {
+                if self.help_open || self.url_picker.is_some() {
                     self.ime.clear();
                     return;
                 }
@@ -760,7 +852,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
-                if self.help_open { return; }
+                if self.help_open || self.url_picker.is_some() { return; }
                 let tracking = self.terminal.screen.mouse_tracking;
                 if tracking.enabled() && !self.modifiers.shift_key() && !self.selecting {
                     let at = self.cell_at_mouse();
@@ -789,7 +881,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
-                if self.help_open { return; }
+                if self.help_open || self.url_picker.is_some() { return; }
                 let tracking = self.terminal.screen.mouse_tracking;
                 let at = self.cell_at_mouse();
                 // Once Shift begins a local selection inside a TUI, finish
@@ -858,6 +950,17 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(picker) = self.url_picker.as_mut() {
+                    let amount = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
+                        MouseScrollDelta::PixelDelta(pos) => (pos.y / 24.0).round() as i32,
+                    };
+                    picker.move_by(-amount, url_picker::visible_rows(self.terminal.screen.rows));
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 if self.help_open {
                     let amount = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
@@ -1017,8 +1120,9 @@ fn main() -> Result<()> {
         palette,
     );
     terminal.screen.osc52_write_allowed = config.clipboard.enabled && config.clipboard.osc52_write;
-    terminal.screen.command_capture = CommandCapture::new(
+    terminal.screen.command_capture = CommandCapture::with_url_history(
         config.command_output.max_megabytes.saturating_mul(1024 * 1024),
+        config.url_picker.recent_outputs,
     );
     let shape = match config.cursor.style.as_str() {
         "block" => CursorShape::Block,
@@ -1056,6 +1160,7 @@ fn main() -> Result<()> {
         bell_flash_until: None,
         help_open: false,
         help_scroll: 0,
+        url_picker: None,
         toast: None,
         next_toast_frame: None,
     };
@@ -1134,6 +1239,8 @@ mod keyboard_tests {
         assert!(command_shortcut(&Key::Character("O"), cmd_shift, true, "o"));
         assert!(command_shortcut(&Key::Character("o"), ctrl_shift, false, "o"));
         assert!(command_shortcut(&Key::Character("H"), cmd_shift, true, "h"));
+        assert!(command_shortcut(&Key::Character("U"), cmd_shift, true, "u"));
+        assert!(command_shortcut(&Key::Character("u"), ctrl_shift, false, "u"));
         assert!(command_shortcut(&Key::Character("h"), ctrl_shift, false, "h"));
         assert!(!command_shortcut(&Key::Character("o"), ModifiersState::SUPER, true, "o"));
         assert!(!command_shortcut(&Key::Character("o"), ctrl_shift, true, "o"));

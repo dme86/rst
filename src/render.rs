@@ -14,6 +14,7 @@ use crate::{
     shaping::{self, FontBytes, ShapedText},
     terminal::{Cell, CursorShape, Screen, TextStyle},
     selection::Selection,
+    url_picker::{self, UrlPicker},
 };
 
 struct Glyph {
@@ -601,6 +602,104 @@ impl Renderer {
         };
         let bottom = top + panel_h.saturating_sub(self.cell_height);
         self.draw_ui_text(pixels, width, height, text_x, bottom, footer, border, cols, screen);
+    }
+
+    /// A scrollable, keyboard-only URL palette rendered over the current
+    /// terminal surface. No PTY bytes, scrollback or cell contents change.
+    pub fn draw_url_picker_overlay(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        screen: &Screen,
+        picker: &UrlPicker,
+        history_depth: usize,
+    ) {
+        if width == 0 || height == 0 || self.cell_width == 0 || self.cell_height == 0 {
+            return;
+        }
+        let cols = screen.cols.saturating_sub(4).min(88).max(1);
+        let visible = url_picker::visible_rows(screen.rows);
+        let panel_w = (cols + 4).saturating_mul(self.cell_width).min(width);
+        let panel_h = (visible + 6).saturating_mul(self.cell_height).min(height);
+        let left = width.saturating_sub(panel_w) / 2;
+        let top = height.saturating_sub(panel_h) / 2;
+        let background = screen.palette.background;
+        let accent = screen.palette.ansi[4];
+        let panel = blend(screen.palette.foreground, background, 27);
+        let secondary = blend(screen.palette.foreground, panel, 173);
+
+        // Dim the underlying terminal so the selected URL is unmistakable.
+        blend_rect(pixels, width, height, 0, 0, width, height, 0x000000, 135);
+        blend_rect(pixels, width, height, left.saturating_add(4),
+                   top.saturating_add(5), panel_w, panel_h, 0x000000, 95);
+        rect(pixels, width, height, left, top, panel_w, panel_h, panel);
+        rect(pixels, width, height, left, top, panel_w, 2.min(panel_h), accent);
+        rect(pixels, width, height, left, top, 2.min(panel_w), panel_h, accent);
+        rect(pixels, width, height, left + panel_w.saturating_sub(2),
+             top, 2.min(panel_w), panel_h, accent);
+        rect(pixels, width, height, left,
+             top + panel_h.saturating_sub(2), panel_w, 2.min(panel_h), accent);
+
+        let text_x = left.saturating_add(2 * self.cell_width);
+        let header = format!("rst  /  LINKS   {} found", picker.urls.len());
+        self.draw_ui_text(pixels, width, height, text_x, top,
+                          &header, accent, cols, screen);
+        let scope = format!("Last {history_depth} outputs   ·   newest first   ·   HTTP(S) only");
+        self.draw_ui_text(pixels, width, height, text_x,
+                          top.saturating_add(self.cell_height),
+                          &scope, secondary, cols, screen);
+
+        if picker.urls.is_empty() {
+            self.draw_ui_text(pixels, width, height, text_x,
+                              top.saturating_add(3 * self.cell_height),
+                              "No URLs found in recent command output.",
+                              screen.palette.foreground, cols, screen);
+        } else {
+            // A window resize may change the number of visible rows.
+            // Re-clamp the viewport without mutating the picker state.
+            let first = picker.scroll
+                .max(picker.selected.saturating_add(1).saturating_sub(visible))
+                .min(picker.selected)
+                .min(picker.urls.len().saturating_sub(visible));
+            for (line, index) in (first..picker.urls.len().min(first + visible)).enumerate() {
+                let y = top.saturating_add((line + 2) * self.cell_height);
+                if y >= top.saturating_add(panel_h.saturating_sub(self.cell_height * 2)) {
+                    break;
+                }
+                let selected = index == picker.selected;
+                if selected {
+                    rect(pixels, width, height,
+                         left.saturating_add(3), y,
+                         panel_w.saturating_sub(6), self.cell_height,
+                         blend(accent, panel, 64));
+                    rect(pixels, width, height,
+                         left.saturating_add(3), y,
+                         3.min(panel_w), self.cell_height, accent);
+                }
+                let indicator = if selected { "›" } else { " " };
+                let label = format!("{indicator} {:>3}  {}", index + 1, picker.urls[index]);
+                // Keep full URLs in the model; draw_ui_text only clips the
+                // visual representation to the available terminal cells.
+                self.draw_ui_text(pixels, width, height, text_x, y,
+                    &label, if selected { screen.palette.foreground } else { secondary },
+                    cols, screen);
+            }
+        }
+
+        let position = if picker.urls.is_empty() {
+            "0 / 0".to_owned()
+        } else {
+            format!("{} / {}", picker.selected + 1, picker.urls.len())
+        };
+        self.draw_ui_text(pixels, width, height, text_x,
+            top.saturating_add((visible + 3) * self.cell_height),
+            &format!("Selected: {position}"),
+            secondary, cols, screen);
+        self.draw_ui_text(pixels, width, height, text_x,
+            top.saturating_add((visible + 4) * self.cell_height),
+            "j/k  ↑↓ move   PgUp/PgDn page   Enter open   Esc close",
+            accent, cols, screen);
     }
 
     /// Briefly tint ONLY screen cells belonging to the OSC 133 command
@@ -2285,6 +2384,54 @@ mod tests {
         assert_eq!(term.screen.grid[0][0].ch, 'n');
         assert_eq!(term.screen.grid[0][1].ch, 'o');
         assert!(term.screen.history.is_empty());
+    }
+
+    #[test]
+    fn url_picker_highlights_selection_without_modifying_terminal() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(80, 24, 2, palette);
+        term.advance(b"normal terminal output");
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &term.screen, None, None);
+        let baseline = pixels.clone();
+        let mut picker = crate::url_picker::UrlPicker::new(
+            vec!["https://example.org".into(), "https://rust-lang.org".into()],
+        );
+        renderer.draw_url_picker_overlay(
+            &mut pixels, width, height, &term.screen, &picker, 20,
+        );
+        assert_ne!(pixels, baseline);
+        let first = pixels.clone();
+        picker.move_by(1, crate::url_picker::visible_rows(term.screen.rows));
+        renderer.draw(&mut pixels, width, height, &term.screen, None, None);
+        renderer.draw_url_picker_overlay(
+            &mut pixels, width, height, &term.screen, &picker, 20,
+        );
+        assert_ne!(pixels, first);
+        assert_eq!(term.screen.grid[0][0].ch, 'n');
+        assert!(term.screen.history.is_empty());
+    }
+
+    #[test]
+    fn url_picker_clips_safely_on_tiny_windows() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let term = crate::terminal::Terminal::new(3, 2, 0, palette);
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw_url_picker_overlay(
+            &mut pixels, width, height, &term.screen,
+            &crate::url_picker::UrlPicker::new(vec![]), 20,
+        );
+        assert!(pixels.iter().any(|&px| px != 0));
     }
 
     #[test]

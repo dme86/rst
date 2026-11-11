@@ -14,6 +14,8 @@ pub struct Config {
     #[serde(default)]
     pub command_output: CommandOutputConfig,
     #[serde(default)]
+    pub url_picker: UrlPickerConfig,
+    #[serde(default)]
     pub bell: BellConfig,
     pub colors: Colors,
 }
@@ -72,6 +74,17 @@ pub struct CommandOutputConfig {
 
 impl Default for CommandOutputConfig {
     fn default() -> Self { Self { max_megabytes: 32 } }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct UrlPickerConfig {
+    /// Number of finished OSC 133 command outputs to inspect for URLs.
+    pub recent_outputs: usize,
+}
+
+impl Default for UrlPickerConfig {
+    fn default() -> Self { Self { recent_outputs: 20 } }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -152,6 +165,8 @@ pub fn load() -> Result<Config> {
     anyhow::ensure!(config.window.padding <= 128, "padding must be <= 128");
     anyhow::ensure!((1..=128).contains(&config.command_output.max_megabytes),
         "command_output.max_megabytes must be 1..128");
+    anyhow::ensure!((1..=100).contains(&config.url_picker.recent_outputs),
+        "url_picker.recent_outputs must be 1..100");
     anyhow::ensure!(supported_cursor_style(&config.cursor.style), "cursor.style must be block, underline, or bar");
     anyhow::ensure!((100..=3000).contains(&config.cursor.blink_interval_ms), "cursor.blink_interval_ms must be 100..3000");
     Ok(config)
@@ -167,6 +182,12 @@ mod tests {
         assert_eq!(base.command_output.max_megabytes, 32);
         let legacy: CommandOutputConfig = toml::from_str("").unwrap();
         assert_eq!(legacy.max_megabytes, 32);
+        assert_eq!(base.url_picker.recent_outputs, 20);
+        let mut value: toml::Value =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        value.as_table_mut().unwrap().remove("url_picker");
+        let legacy: Config = value.try_into().unwrap();
+        assert_eq!(legacy.url_picker.recent_outputs, 20);
     }
 
     #[test]
