@@ -93,6 +93,181 @@ struct App {
 }
 
 impl App {
+    fn active_tab_index(&self) -> usize {
+        self.tab_order.iter().position(|id| *id == self.active_tab_id).unwrap_or(0)
+    }
+
+    fn tab_displays(&self) -> Vec<tabs::TabDisplay> {
+        self.tab_order.iter().map(|id| {
+            let (title, unread) = if *id == self.active_tab_id {
+                (&self.terminal.screen.title, false)
+            } else {
+                let tab = self.inactive_tabs.iter().find(|tab| tab.id == *id)
+                    .expect("all inactive IDs remain stored");
+                (&tab.terminal.screen.title, tab.unread)
+            };
+            let display = if title == terminal::DEFAULT_TITLE || title.is_empty() {
+                self.shell_label.clone()
+            } else {
+                title.chars().take(50).collect()
+            };
+            tabs::TabDisplay {
+                id: *id,
+                title: display,
+                active: *id == self.active_tab_id,
+                unread,
+            }
+        }).collect()
+    }
+
+    /// The tab bar lives outside the terminal VT grid, not in scrollback.
+    fn mouse_in_bar(&self) -> bool {
+        if !self.config.tabs.enabled { return false; }
+        let (Some(renderer), Some(window)) = (&self.renderer, &self.window) else {
+            return false;
+        };
+        let height = window.inner_size().height as usize;
+        let bar_h = tabs::bar_height(renderer.cell_height, true).min(height);
+        let top = if self.config.tabs.position == "bottom" {
+            height.saturating_sub(bar_h)
+        } else { 0 };
+        let y = self.mouse.1.max(0.0) as usize;
+        y >= top && y < top.saturating_add(bar_h)
+    }
+
+    fn tab_bar_action(&self) -> Option<tabs::TabAction> {
+        if !self.mouse_in_bar() { return None; }
+        let renderer = self.renderer.as_ref()?;
+        let col = (self.mouse.0.max(0.0) as usize)
+            .saturating_sub(renderer.padding) / renderer.cell_width.max(1);
+        let layout = tabs::BarLayout::for_width(
+            self.tab_order.len(), self.active_tab_index(), self.terminal.screen.cols,
+        );
+        layout.hit_test(col, self.terminal.screen.cols, self.config.tabs.close_buttons)
+    }
+
+    fn clear_tab_interaction(&mut self) {
+        self.selection = None;
+        self.selecting = false;
+        self.clicks.reset();
+        self.mouse_reporter.reset();
+        self.ime.clear();
+        self.help_open = false;
+        self.url_picker = None;
+        self.toast = None;
+        self.next_toast_frame = None;
+        self.bell_flash_until = None;
+        self.next_cursor_blink =
+            Instant::now() + Duration::from_millis(self.config.cursor.blink_interval_ms);
+        self.next_text_blink = Instant::now() + Duration::from_millis(800);
+        self.terminal.screen.cursor_blink_on = true;
+        self.terminal.screen.text_blink_on = true;
+        if let Some(window) = &self.window {
+            window.set_title(&self.terminal.screen.title);
+            window.request_redraw();
+        }
+        self.update_ime_cursor_area();
+    }
+
+    fn switch_tab(&mut self, target_id: u64) {
+        if !self.config.tabs.enabled || target_id == self.active_tab_id {
+            return;
+        }
+        let Some(tab) = self.inactive_tabs.iter_mut().find(|tab| tab.id == target_id) else {
+            return;
+        };
+        if self.focus.is_focused() && self.terminal.screen.focus_reporting {
+            self.pty.write(b"\x1b[O");
+        }
+        std::mem::swap(&mut self.terminal, &mut tab.terminal);
+        std::mem::swap(&mut self.pty, &mut tab.pty);
+        std::mem::swap(&mut self.active_tab_id, &mut tab.id);
+        tab.unread = false;
+        if self.focus.is_focused() && self.terminal.screen.focus_reporting {
+            self.pty.write(b"\x1b[I");
+        }
+        self.clear_tab_interaction();
+    }
+
+    fn switch_relative_tab(&mut self, step: isize) {
+        let len = self.tab_order.len();
+        if !self.config.tabs.enabled || len < 2 { return; }
+        let current = self.active_tab_index();
+        let next = (current as isize + step).rem_euclid(len as isize) as usize;
+        self.switch_tab(self.tab_order[next]);
+    }
+
+    fn new_tab(&mut self) {
+        if !self.config.tabs.enabled { return; }
+        if self.tab_order.len() >= self.config.tabs.max_tabs {
+            self.notify(format!("Maximum of {} tabs reached", self.config.tabs.max_tabs));
+            return;
+        }
+        let new_id = self.next_tab_id;
+        let cols = self.terminal.screen.cols;
+        let rows = self.terminal.screen.rows;
+        let next_terminal = match configured_terminal(&self.config, cols, rows) {
+            Ok(terminal) => terminal,
+            Err(err) => {
+                self.notify(format!("Cannot initialize tab: {err}"));
+                return;
+            }
+        };
+        let mut next_pty = match PtySession::start(
+            new_id, cols, rows, &self.config.terminal.term, self.proxy.clone(),
+        ) {
+            Ok(pty) => pty,
+            Err(err) => {
+                self.notify(format!("Cannot start shell: {err}"));
+                return;
+            }
+        };
+        if let Some(renderer) = &self.renderer {
+            next_pty.resize(cols, rows, renderer.cell_width, renderer.cell_height);
+        }
+        let previous = StoredTab {
+            id: self.active_tab_id,
+            terminal: std::mem::replace(&mut self.terminal, next_terminal),
+            pty: std::mem::replace(&mut self.pty, next_pty),
+            unread: false,
+        };
+        self.inactive_tabs.push(previous);
+        let insert_at = self.active_tab_index() + 1;
+        self.tab_order.insert(insert_at, new_id);
+        self.active_tab_id = new_id;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
+        self.clear_tab_interaction();
+    }
+
+    /// Returns true if the last tab was closed and rst should quit.
+    fn close_tab(&mut self, id: u64, kill: bool) -> bool {
+        if !self.tab_order.contains(&id) {
+            return false; // Stale reader event from an already closed tab.
+        }
+        if self.tab_order.len() == 1 {
+            if kill { self.pty.terminate(); }
+            return true;
+        }
+        if id == self.active_tab_id {
+            let at = self.active_tab_index();
+            let next = if at + 1 < self.tab_order.len() {
+                self.tab_order[at + 1]
+            } else {
+                self.tab_order[at - 1]
+            };
+            self.switch_tab(next);
+        }
+        if let Some(position) = self.inactive_tabs.iter().position(|tab| tab.id == id) {
+            let mut old = self.inactive_tabs.swap_remove(position);
+            if kill { old.pty.terminate(); }
+        }
+        self.tab_order.retain(|tab_id| *tab_id != id);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        false
+    }
+
     fn resize_terminal(&mut self) {
         let (Some(window), Some(renderer)) = (&self.window, &self.renderer) else {
             return;
