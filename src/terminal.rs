@@ -4,7 +4,7 @@ use unicode_width::UnicodeWidthChar;
 use unicode_segmentation::UnicodeSegmentation;
 use vte::{Params, Parser, Perform};
 
-use crate::{charset::CharacterSet, config::Colors, mouse::MouseTracking, osc, selection::Selection};
+use crate::{charset::CharacterSet, command_capture::CommandCapture, config::Colors, mouse::MouseTracking, osc, selection::Selection};
 
 pub const DEFAULT_TITLE: &str = "rst — Rust Simple Terminal";
 
@@ -261,6 +261,7 @@ pub struct Screen {
     pub icon_title: String,
     pub osc52_write_allowed: bool,
     clipboard_writes: Vec<String>,
+    pub command_capture: CommandCapture,
     fg: u32,
     bg: u32,
     fg_source: ColorSource,
@@ -347,6 +348,7 @@ impl Screen {
             icon_title: DEFAULT_TITLE.to_string(),
             osc52_write_allowed: false,
             clipboard_writes: Vec::new(),
+            command_capture: CommandCapture::default(),
             history_limit,
             scroll_top: 0,
             scroll_bottom: rows,
@@ -1040,6 +1042,13 @@ impl Screen {
                 }
             }
             110..=112 => self.reset_osc_color(code),
+            133 => {
+                // OSC 133;A/B/C/D shell integration. Only the first byte
+                // after ';' is meaningful; e.g. D;0 includes exit status.
+                if let Some(marker) = params.get(1).and_then(|part| part.first()) {
+                    self.command_capture.marker(*marker);
+                }
+            },
             _ => {} // Never run unknown OSC commands or window operations.
         }
     }
@@ -1206,10 +1215,15 @@ impl Perform for Screen {
     }
 
     fn print(&mut self, c: char) {
+        // Capture displayed Unicode, including DEC line-drawing mappings,
+        // not the original ASCII aliases or raw VT escape sequences.
+        let visible = self.charsets[self.active_charset].map(c);
+        self.command_capture.print(visible);
         self.put_char(c);
     }
 
     fn execute(&mut self, byte: u8) {
+        self.command_capture.control(byte);
         match byte {
             0x07 => self.pending_bells = self.pending_bells.saturating_add(1),
             0x0e => self.active_charset = 1, // SO / LS1: invoke G1
@@ -1295,7 +1309,11 @@ impl Perform for Screen {
                 _ => {}
             },
             'J' => self.erase_display(values.first().copied().unwrap_or(0)),
-            'K' => self.erase_line(values.first().copied().unwrap_or(0)),
+            'K' => {
+                let mode = values.first().copied().unwrap_or(0);
+                self.command_capture.erase_line(mode);
+                self.erase_line(mode);
+            },
             'm' => self.sgr(if values.is_empty() { &[0] } else { &values }),
             'S' => self.scroll_up(n(0).min(self.rows)),
             'T' => self.scroll_down(n(0).min(self.rows)),
@@ -1460,7 +1478,9 @@ impl Perform for Screen {
                 // A BEL before RIS in the same PTY read still rings; the
                 // reset must not discard unconsumed UI notifications.
                 let pending_bells = self.pending_bells;
+                let command_capture = std::mem::take(&mut self.command_capture);
                 *self = Self::new(cols, rows, limit, palette);
+                self.command_capture = command_capture;
                 self.pending_bells = pending_bells;
                 self.osc52_write_allowed = osc52_allowed;
                 self.set_default_cursor_style(default_cursor_style);
