@@ -734,11 +734,12 @@ impl App {
         if self.config.tabs.enabled {
             let macos = cfg!(target_os = "macos");
             if tab_shortcut(&key, self.modifiers, macos, "t") {
-                self.new_tab();
+                if !event.repeat { self.new_tab(); }
                 return;
             }
             if tab_shortcut(&key, self.modifiers, macos, "w") {
-                if self.close_tab(self.active_tab_id, true) {
+                // A held Cmd+W must not close every tab via auto-repeat.
+                if !event.repeat && self.close_tab(self.active_tab_id, true) {
                     event_loop.exit();
                 }
                 return;
@@ -747,7 +748,9 @@ impl App {
                 && (self.modifiers == ModifiersState::CONTROL
                     || self.modifiers == (ModifiersState::CONTROL | ModifiersState::SHIFT))
             {
-                self.switch_relative_tab(if self.modifiers.shift_key() { -1 } else { 1 });
+                if !event.repeat {
+                    self.switch_relative_tab(if self.modifiers.shift_key() { -1 } else { 1 });
+                }
                 return;
             }
             let digit_modifier = if macos {
