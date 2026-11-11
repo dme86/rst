@@ -67,7 +67,7 @@ impl ImeState {
                 None
             }
             Ime::Preedit(text, cursor) => {
-                if text.is_empty() || text.len() > MAX_PREEDIT_BYTES {
+                if keyboard_locked || text.is_empty() || text.len() > MAX_PREEDIT_BYTES {
                     self.clear();
                 } else {
                     let cursor = cursor.map(|(start, end)| (
