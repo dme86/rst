@@ -217,16 +217,20 @@ impl Selection {
                  if y == end.1 { end.0 } else { screen.cols - 1 })
             };
             let mut text = String::new();
-            for x in first..=last {
+            // A rectangle can intersect the trailing cell of a wide glyph.
+            // Scan one column to the left and include its owner when needed.
+            let scan_from = if self.kind == SelectionKind::Rectangular {
+                first.saturating_sub(1)
+            } else {
+                first
+            };
+            for x in scan_from..=last {
                 let cell = row[x];
                 if cell.width == 0 {
                     continue;
                 }
-                // Rectangle that starts on the trailing half of a wide
-                // glyph still includes its displayed Unicode character.
-                if self.kind == SelectionKind::Rectangular
-                    && cell.width == 2
-                    && x + 1 < first
+                if x < first && !(self.kind == SelectionKind::Rectangular
+                    && cell.width == 2 && x + 1 >= first)
                 {
                     continue;
                 }
