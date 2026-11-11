@@ -112,7 +112,6 @@ impl App {
                 title.chars().take(50).collect()
             };
             tabs::TabDisplay {
-                id: *id,
                 title: display,
                 active: *id == self.active_tab_id,
                 unread,
@@ -1587,6 +1586,19 @@ mod keyboard_tests {
             zoom_shortcut(&Key::Character("x"), cmd, true),
             None
         );
+    }
+
+    #[test]
+    fn tab_shortcuts_do_not_collide_with_old_window_bindings() {
+        let cmd = ModifiersState::SUPER;
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(tab_shortcut(&Key::Character("t"), cmd, true, "t"));
+        assert!(tab_shortcut(&Key::Character("T"), ctrl_shift, false, "t"));
+        assert!(tab_shortcut(&Key::Character("w"), cmd, true, "w"));
+        assert!(!tab_shortcut(&Key::Character("t"), cmd, false, "t"));
+        assert!(!tab_shortcut(&Key::Character("t"), ctrl_shift, true, "t"));
+        assert!(!tab_shortcut(&Key::Character("t"), cmd | ModifiersState::SHIFT, true, "t"));
+        assert!(!tab_shortcut(&Key::Character("w"), cmd | ModifiersState::ALT, true, "w"));
     }
 
     #[test]
