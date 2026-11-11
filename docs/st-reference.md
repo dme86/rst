@@ -90,11 +90,24 @@ vendor or translate upstream C source.
 - This milestone does not imply complete VT/DEC parity: advanced DCS,
   DECSLRM, protection attributes and many device status queries remain.
 
+## OSC controls (implemented)
+
+- st-style OSC 0/1/2 support for UTF-8 window and icon titles with bounded,
+  sanitized input and empty-title reset.
+- OSC 4/104 and 10/11/12 with 110/111/112 manage all 256 indexed colors
+  and defaults, supporting set, query and reset with 16-bit RGB responses.
+- Cell color provenance enables repainting indexed/default-colored cells,
+  including history and alternate screen, without changing truecolor cells.
+- OSC 52 write-only clipboard integration is disabled by default; opt in using
+  [clipboard].osc52_write. UTF-8 writes are limited to 64 KiB; read queries
+  are always denied, even when clipboard writes are enabled.
+- Parser and state tests live in src/osc.rs and src/osc_tests.rs.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
 - Full Unicode grapheme shaping, zero-width joining and ligatures.
 - Modern negotiated keyboard protocols (CSI-u/kitty) and advanced mouse extensions outside upstream st.
 - Native Wayland clipboard without compositor data-control extensions.
-- IME/preedit integration, hyperlinks, synchronized output, OSC 52 prompts.
+- IME/preedit integration, hyperlinks, synchronized output, and clipboard read prompts.
 - Automated comparison tests against a pinned upstream st revision.
