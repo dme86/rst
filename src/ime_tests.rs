@@ -136,10 +136,10 @@ fn preedit_wraps_from_bottom_screen_row_by_shifting_temporary_overlay_upward() {
         cursor: Some((9, 9)),
     };
     let layout = layout(&preedit, 4, 3, (3, 2));
-    assert_eq!((layout.glyphs[0].col, layout.glyphs[0].row), (0, 0));
-    assert_eq!((layout.glyphs[1].col, layout.glyphs[1].row), (2, 0));
-    assert_eq!((layout.glyphs[2].col, layout.glyphs[2].row), (0, 1));
-    assert_eq!(layout.caret, Some((2, 1)));
+    assert_eq!((layout.glyphs[0].col, layout.glyphs[0].row), (0, 1));
+    assert_eq!((layout.glyphs[1].col, layout.glyphs[1].row), (2, 1));
+    assert_eq!((layout.glyphs[2].col, layout.glyphs[2].row), (0, 2));
+    assert_eq!(layout.caret, Some((2, 2)));
 }
 
 #[test]
@@ -173,4 +173,14 @@ fn oversized_preedit_is_rejected_without_losing_normal_ime_commits() {
     ime.handle(Ime::Preedit("x".repeat(16 * 1024 + 1), None), false);
     assert!(!ime.composing());
     assert_eq!(ime.handle(Ime::Commit("ok".into()), false), Some(b"ok".to_vec()));
+}
+
+#[test]
+fn intra_grapheme_caret_snaps_before_combining_mark() {
+    let preedit = Preedit {
+        text: "e\u{301}x".into(),
+        cursor: Some((1, 1)), // byte 1 is inside the first grapheme
+    };
+    let result = layout(&preedit, 8, 2, (2, 0));
+    assert_eq!(result.caret, Some((2, 0)));
 }
