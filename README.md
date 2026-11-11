@@ -163,6 +163,25 @@ tests in `src/terminal.rs`. Shell shortcuts handled by the desktop
 environment may never reach the terminal. These changes do not implement
 Kitty keyboard protocol or CSI-u negotiation.
 
+### VT/DEC device-control extensions
+
+The existing origin mode (DECOM), delayed auto-wrap (DECAWM), insert/newline
+modes, tab stops, scrolling margins and cursor save/restore are now extended
+with DEC device-control sequences:
+
+- **DECRQM**: query the current state of supported ANSI/DEC modes using
+  `CSI Ps $ p` or `CSI ? Ps $ p`. The response is `CSI [ ? ] Ps ; Pm $ y`,
+  where `Pm` is 1 (set), 2 (reset), or 0 (unknown).
+- **DECSTR** (`CSI ! p`): reset cursor attributes and modes without erasing
+  the screen or scrollback, unlike the full `ESC c` reset.
+- **DECALN** (`ESC # 8`): display an `E` in every screen cell, matching
+  the traditional st alignment test.
+
+All operations have PTY-byte-stream regression tests in
+`src/vt_modes_tests.rs`. These extensions are a compatibility milestone,
+not a claim of complete VT500 emulation; advanced DCS and left/right margins
+are still out of scope.
+
 ### Mouse reporting
 
 rst implements upstream st's legacy X10 (CSI ? 9 h), button tracking
