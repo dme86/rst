@@ -72,7 +72,7 @@ pub fn title(data: &[u8]) -> Option<String> {
 /// Decode clipboard *writes* only. OSC 52 queries ("?") must never
 /// disclose host clipboard contents to a child shell or remote program.
 pub fn clipboard_write(selection: &[u8], payload: &[u8]) -> Option<String> {
-    if selection.is_empty() || !selection.iter().all(|b| matches!(b, b'c' | b'p' | b's' | b'0'..=b'7')) {
+    if selection.is_empty() || !selection.iter().all(|b| matches!(*b, b'c' | b'p' | b's' | b'0'..=b'7')) {
         return None;
     }
     if payload.is_empty() || payload == b"?" || payload.len() > (MAX_OSC52_BYTES + 2) / 3 * 4 {
