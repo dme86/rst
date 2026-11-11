@@ -325,6 +325,13 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        // Only materialize the tiny tab label list when the bar is enabled.
+        let tab_items = if self.config.tabs.enabled {
+            self.tab_displays()
+        } else {
+            Vec::new()
+        };
+        let active_index = self.active_tab_index();
         let (Some(window), Some(surface), Some(renderer)) =
             (&self.window, &mut self.surface, &mut self.renderer)
         else {
@@ -347,14 +354,28 @@ impl App {
                 return;
             }
         };
-        renderer.draw(
-            &mut buffer,
-            size.width as usize,
-            size.height as usize,
-            &self.terminal.screen,
-            self.selection,
-            self.ime.preedit.as_ref(),
-        );
+        let width_px = size.width as usize;
+        let height_px = size.height as usize;
+        let bar_h = tabs::bar_height(renderer.cell_height, self.config.tabs.enabled)
+            .min(height_px);
+        let content_h = height_px.saturating_sub(bar_h);
+        let top_bar = if self.config.tabs.enabled && self.config.tabs.position == "top" {
+            bar_h
+        } else { 0 };
+        // Render the terminal into a framebuffer slice, without modifying
+        // its grid coordinates or adding an extra framebuffer allocation.
+        let start = top_bar.saturating_mul(width_px);
+        let end = start.saturating_add(content_h.saturating_mul(width_px));
+        if content_h != 0 {
+            renderer.draw(
+                &mut buffer[start..end],
+                width_px,
+                content_h,
+                &self.terminal.screen,
+                self.selection,
+                self.ime.preedit.as_ref(),
+            );
+        }
         if self.bell_flash_until.is_some_and(|until| Instant::now() < until) {
             render::paint_bell_border(
                 &mut buffer,
@@ -365,11 +386,19 @@ impl App {
         }
         if let Some(notice) = &self.toast {
             if let Some(output_id) = notice.output_id {
-                renderer.draw_output_copy_highlight(
-                    &mut buffer, size.width as usize, size.height as usize,
-                    &self.terminal.screen, output_id, notice.opacity(Instant::now()),
-                );
+                if content_h != 0 {
+                    renderer.draw_output_copy_highlight(
+                        &mut buffer[start..end], width_px, content_h,
+                        &self.terminal.screen, output_id, notice.opacity(Instant::now()),
+                    );
+                }
             }
+        }
+        if self.config.tabs.enabled {
+            renderer.draw_tab_bar(
+                &mut buffer, width_px, height_px, &self.terminal.screen,
+                &tab_items, active_index, &self.config.tabs,
+            );
         }
         if self.help_open {
             renderer.draw_help_overlay(
