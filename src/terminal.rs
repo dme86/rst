@@ -107,6 +107,8 @@ pub struct Cell {
     /// Copy and makes history/insert/delete efficient and allocation-free.
     pub combining: [char; 8],
     pub combining_len: u8,
+    /// OSC 133 output that most recently wrote this screen cell (0 = none).
+    pub output_id: u32,
 }
 
 impl Cell {
@@ -309,6 +311,7 @@ impl Screen {
             wrapped: false,
             combining: ['\0'; 8],
             combining_len: 0,
+            output_id: 0,
         };
         Self {
             cols,
@@ -476,6 +479,7 @@ impl Screen {
             wrapped: false,
             combining: ['\0'; 8],
             combining_len: 0,
+            output_id: 0,
         }
     }
 
@@ -712,6 +716,7 @@ impl Screen {
             row[self.x..self.x + count].fill(blank);
         }
         let (fg, bg, fg_source, bg_source) = self.ink_colors_with_sources();
+        let output_id = self.command_capture.active_output_id().unwrap_or(0);
         self.grid[self.y][self.x] = Cell {
             ch,
             width: width as u8,
@@ -723,6 +728,7 @@ impl Screen {
             wrapped: false,
             combining: ['\0'; 8],
             combining_len: 0,
+            output_id,
         };
         if width == 2 && self.x + 1 < self.cols {
             self.grid[self.y][self.x + 1] = Cell {
@@ -736,6 +742,7 @@ impl Screen {
                 wrapped: false,
             combining: ['\0'; 8],
             combining_len: 0,
+            output_id,
             };
         }
         if self.x + width == self.cols {
@@ -1416,6 +1423,7 @@ impl Perform for Screen {
                     wrapped: false,
             combining: ['\0'; 8],
             combining_len: 0,
+            output_id: 0,
                 };
                 for row in &mut self.grid {
                     row.fill(cell);
