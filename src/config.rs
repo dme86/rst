@@ -110,7 +110,7 @@ pub fn load() -> Result<Config> {
     anyhow::ensure!(config.window.columns > 0 && config.window.rows > 0, "window size must be positive");
     anyhow::ensure!(config.font.size >= 6.0 && config.font.size <= 72.0, "font size must be 6..72");
     anyhow::ensure!(config.window.padding <= 128, "padding must be <= 128");
-    anyhow::ensure!(config.cursor.style == "block", "only cursor.style = 'block' is supported in v0.1");
+    anyhow::ensure!(matches!(config.cursor.style.as_str(), "block" | "underline" | "bar"), "cursor.style must be block, underline, or bar");
     anyhow::ensure!((100..=3000).contains(&config.cursor.blink_interval_ms), "cursor.blink_interval_ms must be 100..3000");
     Ok(config)
 }
@@ -118,6 +118,16 @@ pub fn load() -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_style_config_supports_block_underline_and_bar() {
+        let config: Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert_eq!(config.cursor.style, "block");
+        for name in ["block", "underline", "bar"] {
+            assert!(matches!(name, "block" | "underline" | "bar"));
+        }
+    }
 
     #[test]
     fn bundled_default_uses_requested_background() {
