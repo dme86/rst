@@ -4,6 +4,7 @@ mod mouse;
 mod osc;
 mod pty;
 mod render;
+mod selection;
 mod terminal;
 
 use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};
@@ -27,6 +28,7 @@ use crate::{
     mouse::MouseReporter,
     pty::{PtySession, UserEvent},
     render::Renderer,
+    selection::{ClickTracker, Selection},
     terminal::{CursorShape, CursorStyle, Palette, Terminal},
 };
 
@@ -42,7 +44,8 @@ struct App {
     modifiers: ModifiersState,
     mouse: (f64, f64),
     mouse_reporter: MouseReporter,
-    selection: Option<((usize, usize), (usize, usize))>,
+    selection: Option<Selection>,
+    clicks: ClickTracker,
     selecting: bool,
     next_cursor_blink: Instant,
     next_text_blink: Instant,
@@ -62,6 +65,9 @@ impl App {
             .max(1);
         if (cols, rows) != (self.terminal.screen.cols, self.terminal.screen.rows) {
             self.terminal.screen.resize(cols, rows);
+            self.selection = None;
+            self.selecting = false;
+            self.clicks.reset();
             self.pty
                 .resize(cols, rows, renderer.cell_width, renderer.cell_height);
         }
@@ -122,8 +128,8 @@ impl App {
         if !self.config.clipboard.enabled {
             return;
         }
-        if let Some((start, end)) = self.selection {
-            let value = self.terminal.screen.selected_text(start, end);
+        if let Some(selection) = self.selection {
+            let value = self.terminal.screen.selected_text(&selection);
             if !value.is_empty() {
                 match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(value)) {
                     Ok(()) => {}
@@ -461,6 +467,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // A mouse release may be lost when the window loses focus.
                     self.mouse_reporter.reset();
                     self.selecting = false;
+                    self.clicks.reset();
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -484,8 +491,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // ordinary local text selection even when tmux tracks the mouse.
                 if self.selecting {
                     let at = self.cell_at_mouse();
-                    if let Some((start, _)) = self.selection {
-                        self.selection = Some((start, at));
+                    if let Some(ref mut selection) = self.selection {
+                        selection.update(&self.terminal.screen, at, self.modifiers.alt_key());
                     }
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -522,9 +529,22 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if button == MouseButton::Left {
                     if state == ElementState::Pressed {
-                        self.selection = Some((at, at));
+                        let snap = self.clicks.press(
+                            Instant::now(), at, self.modifiers.alt_key(),
+                        );
+                        self.selection = Some(Selection::new(
+                            &self.terminal.screen,
+                            at,
+                            snap,
+                            self.modifiers.alt_key(),
+                        ));
                         self.selecting = true;
                     } else if self.selecting {
+                        if let Some(ref mut selection) = self.selection {
+                            selection.update(
+                                &self.terminal.screen, at, self.modifiers.alt_key(),
+                            );
+                        }
                         self.selecting = false;
                         if self.config.clipboard.copy_on_select {
                             self.copy_selection();
@@ -609,6 +629,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // TUI enabling/disabling DEC mouse reporting.
                     self.mouse_reporter.reset();
                     self.selecting = false;
+                    self.clicks.reset();
                     if self.terminal.screen.mouse_tracking.enabled() {
                         // An old local selection must not overlay a TUI that
                         // now owns the mouse.
@@ -675,6 +696,7 @@ fn main() -> Result<()> {
         mouse: (0.0, 0.0),
         mouse_reporter: MouseReporter::default(),
         selection: None,
+        clicks: ClickTracker::default(),
         selecting: false,
         next_cursor_blink: Instant::now()
             + Duration::from_millis(config_blink_ms),
