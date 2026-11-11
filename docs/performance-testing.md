@@ -220,3 +220,15 @@ the framebuffer exactly, for flipped/unflipped roots, scale factors 1 and 2,
 positions near the top and bottom, and resizing through the cached-image path.
 This covers the native geometry that the earlier renderer-only pixel test did
 not exercise. The additional bitmap-context dependency features are test-only.
+
+### Pause cursor blinking without window focus
+
+Only the active tab has a blink clock/cursor layer. Additionally, losing native
+window focus now removes the macOS cursor animation and stops software cursor
+blink deadlines. One redraw leaves a steady visible cursor. On focus return,
+rst redraws immediately and starts a fresh visible phase and full blink interval,
+even if the PTY produces no output. DEC focus reports retain their existing
+transition filtering; SGR text blinking remains independent.
+
+Regression checks cover no software wakeups while unfocused, fresh resume timing,
+and actual native animation removal/recreation with unchanged cursor pixels.

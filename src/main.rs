@@ -377,7 +377,7 @@ impl App {
     }
 
     fn native_cursor_enabled(&self) -> bool {
-        self.native_cursor.is_some() && self.terminal.screen.cursor_style.blink
+        self.focus.is_focused() && self.native_cursor.is_some() && self.terminal.screen.cursor_style.blink
             && self.terminal.screen.show_cursor && self.terminal.screen.view_offset == 0
             && self.ime.preedit.is_none() && !self.help_open && self.url_picker.is_none()
             && self.toast.is_none() && self.bell_flash_until.is_none()
@@ -1014,41 +1014,39 @@ fn blink_step(
     }
 }
 
+/// A paused cursor is steady and schedules no wakeup. Reset its deadline so
+/// resuming never catches up through blink phases missed while unfocused.
+fn cursor_blink_schedule(
+    enabled: bool, visible: bool, deadline: Instant, now: Instant, interval: Duration,
+) -> (bool, Instant, Option<Instant>) {
+    if !enabled { return (true, now + interval, None); }
+    let (visible, next) = blink_step(visible, deadline, now, interval);
+    (visible, next, Some(next))
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(profile) = &mut self.profile { profile.wait(self.native_cursor.as_ref().and_then(|layer| layer.phase())); }
         let now = Instant::now();
-        let mut next_deadline: Option<Instant> = None;
 
         // The cursor and SGR 5/6 text blink on *independent* clocks.
         // Hiding the cursor with DECTCEM must not freeze blinking text.
-        if self.terminal.screen.cursor_style.blink
+        let cursor_blinks = self.focus.is_focused()
+            && self.terminal.screen.cursor_style.blink
             && self.terminal.screen.show_cursor
             && self.window.is_some()
             && self.terminal.screen.view_offset == 0
             && self.ime.preedit.is_none() && !self.help_open && self.url_picker.is_none()
-            && !self.native_cursor_enabled()
-        {
-            let interval = Duration::from_millis(self.config.cursor.blink_interval_ms);
-            let (visible, next) = blink_step(
-                self.terminal.screen.cursor_blink_on,
-                self.next_cursor_blink,
-                now,
-                interval,
-            );
-            if visible != self.terminal.screen.cursor_blink_on {
-                self.terminal.screen.cursor_blink_on = visible;
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-            self.next_cursor_blink = next;
-            next_deadline = Some(next);
-        } else {
-            self.terminal.screen.cursor_blink_on = true;
-            self.next_cursor_blink =
-                now + Duration::from_millis(self.config.cursor.blink_interval_ms);
+            && !self.native_cursor_enabled();
+        let interval = Duration::from_millis(self.config.cursor.blink_interval_ms);
+        let (visible, next, wakeup) = cursor_blink_schedule(cursor_blinks,
+            self.terminal.screen.cursor_blink_on, self.next_cursor_blink, now, interval);
+        if visible != self.terminal.screen.cursor_blink_on {
+            self.terminal.screen.cursor_blink_on = visible;
+            if let Some(window) = &self.window { window.request_redraw(); }
         }
+        self.next_cursor_blink = next;
+        let mut next_deadline = wakeup;
 
         if self.window.is_some() && self.terminal.screen.has_blinking_text() {
             // st's SGR blinktimeout defaults to 800 ms.
@@ -1241,6 +1239,16 @@ impl ApplicationHandler<UserEvent> for App {
                 ) {
                     self.pty.write(report);
                 }
+                // Use one steady software cursor while unfocused. Removing
+                // the native animation also clears its cached patch, so focus
+                // return starts a fresh visible phase even without PTY output.
+                self.terminal.screen.cursor_blink_on = true;
+                self.next_cursor_blink = Instant::now()
+                    + Duration::from_millis(self.config.cursor.blink_interval_ms);
+                if !focused {
+                    if let Some(layer) = &mut self.native_cursor { layer.hide(); }
+                }
+                if let Some(window) = &self.window { window.request_redraw(); }
                 if focused {
                     if let Some(window) = &self.window {
                         window.request_user_attention(None);
@@ -1685,6 +1693,30 @@ mod keyboard_tests {
         assert_eq!(deadline, due + interval);
         let (visible, _) = blink_step(false, deadline, deadline, interval);
         assert!(visible);
+    }
+
+    #[test]
+    fn unfocused_cursor_stays_visible_without_wakeups_and_resumes_fresh() {
+        let now = Instant::now();
+        let interval = Duration::from_millis(700);
+        let mut focus = FocusTracker::default();
+        focus.change(false, false);
+        let (visible, deadline, wakeup) = cursor_blink_schedule(
+            focus.is_focused(), false, now - interval, now, interval);
+        assert!(visible);
+        assert_eq!(deadline, now + interval);
+        assert_eq!(wakeup, None);
+        let later = now + interval * 100;
+        let (visible, deadline, wakeup) = cursor_blink_schedule(
+            focus.is_focused(), visible, deadline, later, interval);
+        assert!(visible);
+        assert_eq!(wakeup, None);
+        focus.change(true, false);
+        let (visible, deadline, wakeup) = cursor_blink_schedule(
+            focus.is_focused(), visible, deadline, later, interval);
+        assert!(visible);
+        assert_eq!(wakeup, Some(later + interval));
+        assert!(!cursor_blink_schedule(true, visible, deadline, deadline, interval).0);
     }
 
     #[test]

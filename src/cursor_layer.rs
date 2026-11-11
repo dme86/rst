@@ -27,12 +27,7 @@ mod platform {
 
     /// NSView's backing layer can already be flipped. Image contents and
     /// nested layer frames then have opposite vertical origins.
-    fn patch_frame(
-        patch: &CursorPatch,
-        scale: f64,
-        height: f64,
-        root_flipped: bool,
-    ) -> CGRect {
+    fn patch_frame(patch: &CursorPatch, scale: f64, height: f64, root_flipped: bool) -> CGRect {
         let top = patch.y as f64 / scale;
         let h = patch.height as f64 / scale;
         let y = if root_flipped { height - top - h } else { top };
@@ -288,6 +283,49 @@ mod position_tests {
             *pixel &= 0xffffff;
         }
         output
+    }
+
+    #[test]
+    fn hiding_cursor_removes_animation_and_same_patch_can_restart() {
+        use objc2_foundation::ns_string;
+        let root = CALayer::new();
+        root.setBounds(CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(100.0, 100.0),
+        ));
+        let mut cursor = super::platform::CursorLayer::from_root(root).unwrap();
+        let patch = crate::render::CursorPatch {
+            x: 10,
+            y: 20,
+            width: 2,
+            height: 3,
+            pixels: vec![0xffffff; 6],
+        };
+        assert!(cursor.update(patch.clone(), 1.0, 700));
+        // SAFETY: the container holds only the CALayer created by CursorLayer,
+        // and the named animation is the CAKeyframeAnimation installed there.
+        unsafe {
+            let layer = cursor
+                .test_container()
+                .sublayers()
+                .unwrap()
+                .firstObject()
+                .unwrap();
+            assert!(!layer.isHidden());
+            assert!(layer
+                .animationForKey(ns_string!("rst-cursor-blink"))
+                .is_some());
+            cursor.hide();
+            assert!(layer.isHidden());
+            assert!(layer
+                .animationForKey(ns_string!("rst-cursor-blink"))
+                .is_none());
+            assert!(cursor.update(patch, 1.0, 700));
+            assert!(!layer.isHidden());
+            assert!(layer
+                .animationForKey(ns_string!("rst-cursor-blink"))
+                .is_some());
+        }
     }
 
     #[test]
