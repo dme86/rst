@@ -174,3 +174,15 @@ fn resizing_keeps_history_addressable_by_selection() {
     assert_eq!(t.screen.history[0].len(), 3);
     assert_eq!(t.screen.display_row(0).len(), 3);
 }
+
+#[test]
+fn rectangle_intersecting_only_wide_glyph_dummy_still_copies_visible_character() {
+    let mut t = terminal(8, 3);
+    t.advance(b"abc\r\n");
+    t.advance("a界b\r\n".as_bytes());
+    t.advance(b"xyz");
+    let mut sel = Selection::new(&t.screen, (2, 0), SelectionSnap::Character, true);
+    sel.update(&t.screen, (2, 2), true);
+    assert_eq!(sel.text(&t.screen), "c\n界\nz");
+    assert!(sel.contains(&t.screen, 1, 1));
+}
