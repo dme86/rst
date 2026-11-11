@@ -3,7 +3,9 @@ use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Parser, Perform};
 
-use crate::{config::Colors, mouse::MouseTracking};
+use crate::{config::Colors, mouse::MouseTracking, osc};
+
+pub const DEFAULT_TITLE: &str = "rst — Rust Simple Terminal";
 
 /// Compact, per-cell SGR attributes. Like st's ATTR_* bitmask, these must
 /// travel with each glyph through scrollback, insert/delete, and alternate
@@ -39,12 +41,24 @@ impl TextStyle {
     }
 }
 
+/// Palette provenance lets OSC recolor existing cells without changing
+/// literal RGB cells, including saved alternate screens and scrollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorSource {
+    DefaultForeground,
+    DefaultBackground,
+    Indexed(u8),
+    Direct,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
     pub width: u8,
     pub fg: u32,
     pub bg: u32,
+    pub fg_source: ColorSource,
+    pub bg_source: ColorSource,
     pub style: TextStyle,
 }
 
@@ -55,6 +69,7 @@ pub struct Palette {
     pub cursor: u32,
     pub selection: u32,
     pub ansi: [u32; 16],
+    pub extended: [u32; 240],
 }
 
 impl TryFrom<&Colors> for Palette {
@@ -81,7 +96,44 @@ impl TryFrom<&Colors> for Palette {
             cursor: parse(&colors.cursor)?,
             selection: parse(&colors.selection)?,
             ansi: parsed.try_into().expect("length validated"),
+            extended: std::array::from_fn(|i| Palette::xterm_indexed((i + 16) as u8)),
         })
+    }
+}
+
+impl Palette {
+    fn xterm_indexed(index: u8) -> u32 {
+        match index {
+            16..=231 => {
+                let i = index as u32 - 16;
+                let channel = |v: u32| if v == 0 { 0 } else { 55 + 40 * v };
+                (channel(i / 36) << 16) | (channel((i / 6) % 6) << 8) | channel(i % 6)
+            }
+            232..=255 => {
+                let grey = 8 + 10 * (index as u32 - 232);
+                (grey << 16) | (grey << 8) | grey
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn indexed(&self, index: u8) -> u32 {
+        if index < 16 { self.ansi[index as usize] }
+        else { self.extended[index as usize - 16] }
+    }
+
+    fn set_indexed(&mut self, index: u8, rgb: u32) {
+        if index < 16 { self.ansi[index as usize] = rgb; }
+        else { self.extended[index as usize - 16] = rgb; }
+    }
+
+    fn resolve(&self, source: ColorSource, literal: u32) -> u32 {
+        match source {
+            ColorSource::DefaultForeground => self.foreground,
+            ColorSource::DefaultBackground => self.background,
+            ColorSource::Indexed(index) => self.indexed(index),
+            ColorSource::Direct => literal,
+        }
     }
 }
 
@@ -100,6 +152,8 @@ struct CursorSnapshot {
     wrap_pending: bool,
     fg: u32,
     bg: u32,
+    fg_source: ColorSource,
+    bg_source: ColorSource,
     style: TextStyle,
     origin_mode: bool,
 }
@@ -130,8 +184,15 @@ pub struct Screen {
     pub insert_mode: bool,
     pub newline_mode: bool,
     pub palette: Palette,
+    initial_palette: Palette,
+    pub title: String,
+    pub icon_title: String,
+    pub osc52_write_allowed: bool,
+    clipboard_writes: Vec<String>,
     fg: u32,
     bg: u32,
+    fg_source: ColorSource,
+    bg_source: ColorSource,
     style: TextStyle,
     history_limit: usize,
     scroll_top: usize,
@@ -153,6 +214,8 @@ impl Screen {
             width: 1,
             fg: palette.foreground,
             bg: palette.background,
+            fg_source: ColorSource::DefaultForeground,
+            bg_source: ColorSource::DefaultBackground,
             style: TextStyle::default(),
         };
         Self {
@@ -180,8 +243,15 @@ impl Screen {
             newline_mode: false,
             fg: palette.foreground,
             bg: palette.background,
+            fg_source: ColorSource::DefaultForeground,
+            bg_source: ColorSource::DefaultBackground,
             style: TextStyle::default(),
+            initial_palette: palette.clone(),
             palette,
+            title: DEFAULT_TITLE.to_string(),
+            icon_title: DEFAULT_TITLE.to_string(),
+            osc52_write_allowed: false,
+            clipboard_writes: Vec::new(),
             history_limit,
             scroll_top: 0,
             scroll_bottom: rows,
@@ -193,6 +263,8 @@ impl Screen {
                 wrap_pending: false,
                 fg: blank.fg,
                 bg: blank.bg,
+                fg_source: blank.fg_source,
+                bg_source: blank.bg_source,
                 style: TextStyle::default(),
                 origin_mode: false,
             },
@@ -209,6 +281,8 @@ impl Screen {
             wrap_pending: self.wrap_pending,
             fg: self.fg,
             bg: self.bg,
+            fg_source: self.fg_source,
+            bg_source: self.bg_source,
             style: self.style,
             origin_mode: self.origin_mode,
         }
@@ -227,8 +301,10 @@ impl Screen {
         self.origin_mode = saved.origin_mode;
         self.x = saved.x.min(self.cols - 1);
         self.y = saved.y.min(self.rows - 1);
-        self.fg = saved.fg;
-        self.bg = saved.bg;
+        self.fg = self.palette.resolve(saved.fg_source, saved.fg);
+        self.bg = self.palette.resolve(saved.bg_source, saved.bg);
+        self.fg_source = saved.fg_source;
+        self.bg_source = saved.bg_source;
         self.style = saved.style;
         self.wrap_pending = self.auto_wrap && saved.wrap_pending && self.x + 1 == self.cols;
     }
