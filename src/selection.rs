@@ -234,7 +234,7 @@ impl Selection {
                 {
                     continue;
                 }
-                text.push(cell.ch);
+                text.push_str(&cell.text());
             }
             result.push_str(text.trim_end_matches(' '));
             let wrapped = row[screen.cols - 1].wrapped;
