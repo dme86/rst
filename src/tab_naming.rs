@@ -68,6 +68,26 @@ pub fn program_from_osc133(raw: &[u8]) -> Option<String> {
     Some(name.to_owned())
 }
 
+/// Fish and other shells can update OSC 0/2 window titles before a TUI
+/// starts (for instance "k9s ~"). If an OSC 133;E executable hint is
+/// absent, extract a safe program token from that title *only while a
+/// command or alternate-screen application is running*. At the prompt,
+/// directory labels still win over an outdated application title.
+fn program_from_running_title(title: &str, shell: &str) -> Option<String> {
+    if title == crate::terminal::DEFAULT_TITLE {
+        return None;
+    }
+    let first = title.split_whitespace().next()?;
+    // Never mistake a CWD or user@host prompt title for a program.
+    if first == shell
+        || first.chars().next().is_some_and(|ch| matches!(ch, '/' | '~' | '.'))
+        || first.chars().any(|ch| matches!(ch, '@' | ':' | '/' | '\\'))
+    {
+        return None;
+    }
+    program_from_osc133(first.as_bytes())
+}
+
 /// Max characters for a tab label, excluding tab number, space and X icon.
 pub fn label_columns(tab_columns: usize, close_buttons: bool) -> usize {
     tab_columns.saturating_sub(if close_buttons { 7 } else { 4 }).max(1)
@@ -122,11 +142,15 @@ pub fn label(
     let normal_title = || (!title.is_empty()
         && title != crate::terminal::DEFAULT_TITLE)
         .then(|| truncate(title, max_chars));
+    let title_program = || running.then(||
+        program_from_running_title(title, shell)
+            .map(|name| truncate(&name, max_chars))
+    ).flatten();
     match mode {
         "directory" => dir(),
         "title" => normal_title(),
         "shell" => Some(truncate(shell, max_chars)),
-        _ => prog().or_else(dir).or_else(normal_title),
+        _ => prog().or_else(title_program).or_else(dir).or_else(normal_title),
     }
     .unwrap_or_else(|| truncate(shell, max_chars))
 }
@@ -172,6 +196,47 @@ mod tests {
         assert_eq!(make("smart", false, Some("k9s")), "~/code/rst");
         assert_eq!(make("directory", true, Some("k9s")), "~/code/rst");
         assert_eq!(make("shell", true, Some("k9s")), "fish");
+    }
+
+    #[test]
+    fn smart_mode_uses_running_fish_title_when_preexec_hint_is_missing() {
+        let cwd = Some("/Users/dan");
+        let title = "k9s ~";
+        assert_eq!(
+            label(cwd, None, title, true, "fish", "smart", cwd, 13),
+            "k9s",
+        );
+        assert_eq!(
+            label(cwd, None, title, false, "fish", "smart", cwd, 13),
+            "~",
+        );
+        assert_eq!(
+            label(cwd, None, title, true, "fish", "directory", cwd, 13),
+            "~",
+        );
+        assert_eq!(
+            label(cwd, None, title, true, "fish", "title", cwd, 13),
+            "k9s ~",
+        );
+    }
+
+    #[test]
+    fn title_fallback_rejects_cwd_and_shell_prompt_titles() {
+        for title in ["~/code/rst", "/Users/dan", "fish ~",
+                      "dan@mac: ~/code", "rst — Rust Simple Terminal"] {
+            assert_eq!(
+                label(Some("/Users/dan"), None, title, true,
+                      "fish", "smart", Some("/Users/dan"), 13),
+                "~",
+                "must not interpret {title:?} as a program",
+            );
+        }
+        assert_eq!(
+            label(Some("/Users/dan"), Some("nvim"), "k9s ~", true,
+                  "fish", "smart", Some("/Users/dan"), 13),
+            "nvim",
+            "explicit OSC 133 metadata takes priority over the window title",
+        );
     }
 
     #[test]

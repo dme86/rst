@@ -115,7 +115,7 @@ impl App {
                 screen.cwd.as_deref(),
                 screen.foreground_program.as_deref(),
                 &screen.title,
-                screen.command_capture.running(),
+                screen.command_capture.running() || screen.in_alternate_screen(),
                 &self.shell_label,
                 &self.config.tabs.name_mode,
                 self.home_dir.as_deref(),

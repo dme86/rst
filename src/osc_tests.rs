@@ -216,3 +216,46 @@ fn osc133_program_metadata_is_not_part_of_output_capture() {
     assert_eq!(t.screen.foreground_program, None);
     assert_eq!(t.screen.command_capture.latest_output(), Ok("text".into()));
 }
+
+
+#[test]
+fn fullscreen_k9s_uses_window_title_when_program_marker_is_missing() {
+    let mut t = terminal();
+    t.advance(b"\x1b]7;file://localhost/Users/dan\x07");
+    t.advance(b"\x1b]133;C\x07");
+    // fish can publish a useful OSC title even when no OSC 133;E
+    // executable hint reaches the terminal (e.g. older shell hooks).
+    t.advance(b"\x1b]0;k9s ~\x07\x1b[?1049h");
+    assert_eq!(t.screen.foreground_program, None);
+    let label = crate::tab_naming::label(
+        t.screen.cwd.as_deref(), t.screen.foreground_program.as_deref(),
+        &t.screen.title,
+        t.screen.command_capture.running() || t.screen.in_alternate_screen(),
+        "fish", "smart", Some("/Users/dan"), 13,
+    );
+    assert_eq!(label, "k9s");
+    t.advance(b"\x1b[?1049l\x1b]133;D\x07");
+    let label = crate::tab_naming::label(
+        t.screen.cwd.as_deref(), t.screen.foreground_program.as_deref(),
+        &t.screen.title,
+        t.screen.command_capture.running() || t.screen.in_alternate_screen(),
+        "fish", "smart", Some("/Users/dan"), 13,
+    );
+    assert_eq!(label, "~", "finished applications must not leave stale titles");
+}
+
+#[test]
+fn fullscreen_app_title_works_without_any_shell_markers() {
+    let mut t = terminal();
+    t.advance(b"\x1b]7;file://localhost/Users/dan\x07");
+    t.advance(b"\x1b[?1049h\x1b]2;nvim README.md\x07");
+    assert!(!t.screen.command_capture.running());
+    assert_eq!(
+        crate::tab_naming::label(
+            t.screen.cwd.as_deref(), t.screen.foreground_program.as_deref(),
+            &t.screen.title,
+            t.screen.command_capture.running() || t.screen.in_alternate_screen(),
+            "fish", "smart", Some("/Users/dan"), 13,
+        ), "nvim",
+    );
+}
