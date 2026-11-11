@@ -279,6 +279,7 @@ impl CommandCapture {
         results
     }
 
+    #[cfg(test)]
     pub fn latest_output(&self) -> Result<String, CopyError> {
         self.latest_output_with_id().map(|(text, _)| text)
     }

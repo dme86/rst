@@ -259,3 +259,32 @@ fn fullscreen_app_title_works_without_any_shell_markers() {
         ), "nvim",
     );
 }
+
+#[test]
+fn oversized_osc_clipboard_is_discarded_and_parser_recovers() {
+    let mut t = terminal();
+    t.screen.osc52_write_allowed = true;
+    t.advance(b"\x1b]52;c;");
+    // The unterminated payload must remain bounded across PTY reads.
+    for _ in 0..32 {
+        t.advance(&vec![b'A'; 8192]);
+    }
+    t.advance(b"\x07OK\x1b]2;recovered\x07");
+    assert!(t.screen.take_clipboard_writes().is_empty());
+    assert_eq!(t.screen.title, "recovered");
+    assert_eq!(t.screen.grid[0][0].ch, 'O');
+    assert_eq!(t.screen.grid[0][1].ch, 'K');
+}
+
+#[test]
+fn maximum_supported_clipboard_survives_fixed_parser_buffer() {
+    use base64::Engine;
+    let mut t = terminal();
+    t.screen.osc52_write_allowed = true;
+    let text = "x".repeat(osc::MAX_OSC52_BYTES);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    t.advance(b"\x1b]52;c;");
+    for chunk in encoded.as_bytes().chunks(8192) { t.advance(chunk); }
+    t.advance(b"\x1b\\");
+    assert_eq!(t.screen.take_clipboard_writes(), vec![text]);
+}

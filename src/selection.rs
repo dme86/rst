@@ -224,8 +224,7 @@ impl Selection {
             } else {
                 first
             };
-            for x in scan_from..=last {
-                let cell = row[x];
+            for (x, &cell) in row.iter().enumerate().take(last + 1).skip(scan_from) {
                 if cell.width == 0 {
                     continue;
                 }

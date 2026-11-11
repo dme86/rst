@@ -128,7 +128,7 @@ impl UrlPicker {
 /// Rows available for URLs, excluding the title, separator, explanation
 /// and keyboard hints. Works even in a very small terminal window.
 pub fn visible_rows(screen_rows: usize) -> usize {
-    screen_rows.saturating_sub(7).min(17).max(1)
+    screen_rows.saturating_sub(7).clamp(1, 17)
 }
 
 #[cfg(test)]

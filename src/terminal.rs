@@ -508,11 +508,6 @@ impl Screen {
         }
     }
 
-    fn ink_colors(&self) -> (u32, u32) {
-        let (fg, bg, _, _) = self.ink_colors_with_sources();
-        (fg, bg)
-    }
-
     fn empty_row(&self) -> Vec<Cell> {
         vec![self.blank(); self.cols]
     }
@@ -529,12 +524,12 @@ impl Screen {
     fn scroll_up(&mut self, lines: usize) {
         for _ in 0..lines {
             let removed = self.grid.remove(self.scroll_top);
-            if self.scroll_top == 0 && self.scroll_bottom == self.rows && self.alternate.is_none() {
-                if self.history_limit > 0 {
-                    self.history.push_back(removed);
-                    while self.history.len() > self.history_limit {
-                        self.history.pop_front();
-                    }
+            if self.scroll_top == 0 && self.scroll_bottom == self.rows && self.alternate.is_none()
+                && self.history_limit > 0
+            {
+                self.history.push_back(removed);
+                while self.history.len() > self.history_limit {
+                    self.history.pop_front();
                 }
             }
             let blank = self.empty_row();
@@ -974,12 +969,17 @@ impl Screen {
     }
 
     fn handle_osc(&mut self, params: &[&[u8]]) {
+        // vte truncates at capacity. Reject the entire command rather than
+        // applying a partial title, URL or clipboard write.
+        if params.iter().map(|part| part.len()).sum::<usize>() >= MAX_OSC_BYTES {
+            return;
+        }
         let Some(code) = params.first().and_then(|p| std::str::from_utf8(p).ok())
             .and_then(|p| p.parse::<u16>().ok()) else {
             return;
         };
         match code {
-            0 | 1 | 2 => {
+            0..=2 => {
                 if params.len() < 2 {
                     return;
                 }
@@ -995,11 +995,11 @@ impl Screen {
                 }
                 if let Some(title) = osc::title(&value) {
                     let title = if title.is_empty() { DEFAULT_TITLE.to_string() } else { title };
-                    if code == 0 || code == 2 {
-                        if self.title != title {
-                            self.title = title.clone();
-                            self.tab_label_revision = self.tab_label_revision.wrapping_add(1);
-                        }
+                    if (code == 0 || code == 2)
+                        && self.title != title
+                    {
+                        self.title = title.clone();
+                        self.tab_label_revision = self.tab_label_revision.wrapping_add(1);
                     }
                     if code == 0 || code == 1 { self.icon_title = title; }
                 }
@@ -1023,7 +1023,7 @@ impl Screen {
             4 => {
                 // OSC 4 accepts multiple index;spec pairs in one string.
                 let mut updated = false;
-                for pair in params[1..].chunks_exact(2) {
+                for pair in params[1..].as_chunks::<2>().0 {
                     let Some(index) = std::str::from_utf8(pair[0]).ok()
                         .and_then(|v| v.parse::<u8>().ok()) else { continue };
                     if pair[1] == b"?" {
@@ -1035,7 +1035,7 @@ impl Screen {
                 }
                 if updated { self.refresh_palette(); }
             }
-            10 | 11 | 12 => {
+            10..=12 => {
                 let Some(arg) = params.get(1) else { return };
                 if *arg == b"?" {
                     let color = match code {
@@ -1540,15 +1540,18 @@ impl Perform for Screen {
     }
 }
 
+// Enough for a base64-encoded 64 KiB OSC 52 clipboard payload.
+const MAX_OSC_BYTES: usize = 96 * 1024;
+
 pub struct Terminal {
-    parser: Parser,
+    parser: Parser<MAX_OSC_BYTES>,
     pub screen: Screen,
 }
 
 impl Terminal {
     pub fn new(cols: usize, rows: usize, history_limit: usize, palette: Palette) -> Self {
         Self {
-            parser: Parser::new(),
+            parser: Parser::new_with_size(),
             screen: Screen::new(cols, rows, history_limit, palette),
         }
     }

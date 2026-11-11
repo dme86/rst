@@ -1,6 +1,8 @@
 use std::{
     io::{Read, Write},
     thread,
+    sync::mpsc::{self, SyncSender},
+    ops::Deref,
 };
 
 use anyhow::{Context, Result};
@@ -11,8 +13,30 @@ use winit::event_loop::EventLoopProxy;
 
 #[derive(Debug)]
 pub enum UserEvent {
-    Output { tab_id: u64, bytes: Vec<u8> },
+    Output { tab_id: u64, bytes: OutputChunk },
     Closed { tab_id: u64 },
+}
+
+// Bound queued output to 1 MiB per session. Returning a credit on drop also
+// handles events for closed tabs and a stopped event loop without losing data.
+const OUTPUT_CHUNK_BYTES: usize = 8192;
+const OUTPUT_QUEUE_CHUNKS: usize = 128;
+
+#[derive(Debug)]
+pub struct OutputChunk {
+    bytes: Vec<u8>,
+    credit: SyncSender<()>,
+}
+
+impl Deref for OutputChunk {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] { &self.bytes }
+}
+
+impl Drop for OutputChunk {
+    fn drop(&mut self) {
+        let _ = self.credit.try_send(());
+    }
 }
 
 pub struct PtySession {
@@ -57,22 +81,29 @@ impl PtySession {
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
+        let (credit, available) = mpsc::sync_channel(OUTPUT_QUEUE_CHUNKS);
+        for _ in 0..OUTPUT_QUEUE_CHUNKS {
+            credit.send(()).expect("credit receiver is alive");
+        }
         thread::Builder::new()
             .name(format!("rst-pty-reader-{tab_id}"))
             .spawn(move || {
-                let mut buffer = [0u8; 8192];
-                loop {
+                let mut buffer = [0u8; OUTPUT_CHUNK_BYTES];
+                while available.recv().is_ok() {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(n) => {
                             if proxy.send_event(UserEvent::Output {
                                 tab_id,
-                                bytes: buffer[..n].to_vec(),
+                                bytes: OutputChunk { bytes: buffer[..n].to_vec(), credit: credit.clone() },
                             }).is_err() {
                                 break;
                             }
                         }
-                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                            let _ = credit.try_send(());
+                            continue;
+                        }
                         Err(_) => break,
                     }
                 }
@@ -128,11 +159,35 @@ impl PtySession {
         let size = PtySize {
             rows: rows.min(u16::MAX as usize) as u16,
             cols: cols.min(u16::MAX as usize) as u16,
-            pixel_width: (cols * cell_width).min(u16::MAX as usize) as u16,
-            pixel_height: (rows * cell_height).min(u16::MAX as usize) as u16,
+            pixel_width: cols.saturating_mul(cell_width).min(u16::MAX as usize) as u16,
+            pixel_height: rows.saturating_mul(cell_height).min(u16::MAX as usize) as u16,
         };
         if let Err(err) = self.master.resize(size) {
             eprintln!("rst: PTY resize: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_credit_is_held_until_chunk_is_dropped() {
+        let (credit, available) = mpsc::sync_channel(1);
+        credit.send(()).unwrap();
+        available.recv().unwrap();
+        let chunk = OutputChunk { bytes: b"output".to_vec(), credit };
+        assert_eq!(&*chunk, b"output");
+        assert!(matches!(available.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        drop(chunk);
+        assert_eq!(available.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn dropping_output_after_reader_exits_does_not_block() {
+        let (credit, available) = mpsc::sync_channel(1);
+        drop(available);
+        drop(OutputChunk { bytes: vec![], credit });
     }
 }

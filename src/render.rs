@@ -18,6 +18,8 @@ use crate::{
     url_picker::{self, UrlPicker},
 };
 
+const MAX_GLYPH_CACHE_ENTRIES: usize = 4096;
+
 struct Glyph {
     metrics: Metrics,
     bitmap: Vec<u8>,
@@ -28,15 +30,33 @@ struct Glyph {
 /// attribute rather than silently rendering a regular glyph.
 fn load_font_face(db: &Database, id: fontdb::ID) -> Option<(Font, FontBytes)> {
     db.with_face_data(id, |data, index| {
+        let bytes: std::sync::Arc<[u8]> = data.into();
         let font = Font::from_bytes(
-            data.to_vec(),
+            bytes.clone(),
             FontSettings {
                 collection_index: index,
                 ..FontSettings::default()
             },
         ).ok()?;
-        Some((font, FontBytes { bytes: data.to_vec(), face_index: index }))
+        Some((font, FontBytes { bytes, face_index: index }))
     }).flatten()
+}
+
+// Style faces are discovered at startup, but parsed only on first use.
+// Most shells initially draw regular text; eagerly parsing every variant
+// delays the first window for fonts that may never be used in that session.
+struct LazyFont {
+    source: FontBytes,
+    parsed: std::sync::OnceLock<Option<Font>>,
+}
+
+impl LazyFont {
+    fn font(&self) -> Option<&Font> {
+        self.parsed.get_or_init(|| Font::from_bytes(
+            self.source.bytes.clone(),
+            FontSettings { collection_index: self.source.face_index, ..FontSettings::default() },
+        ).ok()).as_ref()
+    }
 }
 
 /// Resolve real bold/italic faces *and their original bytes*. Rustybuzz and
@@ -46,7 +66,7 @@ fn load_style_face(
     families: &[Family<'_>],
     bold: bool,
     italic: bool,
-) -> Option<(Font, FontBytes)> {
+) -> Option<LazyFont> {
     let query = Query {
         families,
         weight: if bold { Weight::BOLD } else { Weight::NORMAL },
@@ -61,14 +81,17 @@ fn load_style_face(
     if italic && face.style == Style::Normal {
         return None;
     }
-    load_font_face(db, id)
+    db.with_face_data(id, |data, face_index| LazyFont {
+        source: FontBytes { bytes: data.into(), face_index },
+        parsed: std::sync::OnceLock::new(),
+    })
 }
 
 pub struct Renderer {
     fonts: Vec<Font>,
     font_sources: Vec<FontBytes>,
     // For each regular fallback face: bold, italic, bold-italic variants.
-    styled_fonts: Vec<[Option<Font>; 3]>,
+    styled_fonts: Vec<[Option<LazyFont>; 3]>,
     styled_sources: Vec<[Option<FontBytes>; 3]>,
     glyphs: HashMap<(usize, u8, char), Glyph>,
     indexed_glyphs: HashMap<(usize, u8, u16), Glyph>,
@@ -96,6 +119,7 @@ impl Renderer {
         let mut styled_sources = Vec::new();
         let mut loaded = Vec::new();
         let mut seen = HashSet::new();
+        let mut seen_faces = HashSet::new();
         let debug_fonts = std::env::var_os("RST_DEBUG_FONTS").is_some();
 
         for family in std::iter::once(&config.family).chain(config.fallback.iter()) {
@@ -107,6 +131,7 @@ impl Renderer {
                 ..Query::default()
             };
             if let Some((font, source)) = db.query(&query)
+                .filter(|id| seen_faces.insert(*id))
                 .and_then(|id| load_font_face(&db, id))
             {
                 let family_query = [Family::Name(family)];
@@ -116,9 +141,9 @@ impl Renderer {
                     load_style_face(&db, &family_query, true, true),
                 ];
                 styled_sources.push(std::array::from_fn(|i| {
-                    variants[i].as_ref().map(|(_, bytes)| bytes.clone())
+                    variants[i].as_ref().map(|font| font.source.clone())
                 }));
-                styled_fonts.push(variants.map(|value| value.map(|(font, _)| font)));
+                styled_fonts.push(variants);
                 fonts.push(font);
                 font_sources.push(source);
                 loaded.push(family.to_string());
@@ -134,6 +159,7 @@ impl Renderer {
                 ..Query::default()
             };
             if let Some((font, source)) = db.query(&query)
+                .filter(|id| seen_faces.insert(*id))
                 .and_then(|id| load_font_face(&db, id))
             {
                 let family_query = [Family::Monospace];
@@ -143,9 +169,9 @@ impl Renderer {
                     load_style_face(&db, &family_query, true, true),
                 ];
                 styled_sources.push(std::array::from_fn(|i| {
-                    variants[i].as_ref().map(|(_, bytes)| bytes.clone())
+                    variants[i].as_ref().map(|font| font.source.clone())
                 }));
-                styled_fonts.push(variants.map(|value| value.map(|(font, _)| font)));
+                styled_fonts.push(variants);
                 fonts.push(font);
                 font_sources.push(source);
                 loaded.push("system monospace".to_string());
@@ -219,7 +245,7 @@ impl Renderer {
         };
         let variant = preferred.iter().copied().find(|&candidate| {
             self.styled_fonts[index][candidate as usize - 1]
-                .as_ref().is_some_and(|font| font.has_glyph(ch))
+                .as_ref().and_then(LazyFont::font).is_some_and(|font| font.has_glyph(ch))
         }).unwrap_or(0);
         (index, variant)
     }
@@ -293,7 +319,7 @@ impl Renderer {
             &self.fonts[face.0]
         } else {
             self.styled_fonts[face.0][face.1 as usize - 1]
-                .as_ref().expect("variant selected from available face")
+                .as_ref().and_then(LazyFont::font).expect("variant selected from available face")
         };
         if shaped.glyphs.iter().any(|glyph| glyph.index >= face_font.glyph_count()) {
             return false;
@@ -308,6 +334,11 @@ impl Renderer {
         for item in &shaped.glyphs {
             let gid = item.index;
             let size = self.font_size;
+            if self.indexed_glyphs.len() >= MAX_GLYPH_CACHE_ENTRIES
+                && !self.indexed_glyphs.contains_key(&(face.0, face.1, gid))
+            {
+                self.indexed_glyphs.clear();
+            }
             let bitmap = self.indexed_glyphs.entry((face.0, face.1, gid))
                 .or_insert_with(|| {
                     let (metrics, bitmap) = face_font.rasterize_indexed(gid, size);
@@ -437,7 +468,7 @@ impl Renderer {
             .copied()
             .find(|&variant| {
                 self.styled_fonts[index][variant as usize - 1]
-                    .as_ref()
+                    .as_ref().and_then(LazyFont::font)
                     .is_some_and(|font| font.has_glyph(ch))
             })
             .unwrap_or(0);
@@ -445,12 +476,17 @@ impl Renderer {
             &self.fonts[index]
         } else {
             self.styled_fonts[index][variant as usize - 1]
-                .as_ref()
+                .as_ref().and_then(LazyFont::font)
                 .expect("style variant was checked")
         };
         let synth_bold = bold && variant != 1 && variant != 3;
         let synth_italic = italic && variant != 2 && variant != 3;
         let size = self.font_size;
+        if self.glyphs.len() >= MAX_GLYPH_CACHE_ENTRIES
+            && !self.glyphs.contains_key(&(index, variant, ch))
+        {
+            self.glyphs.clear();
+        }
         let glyph = self.glyphs.entry((index, variant, ch)).or_insert_with(|| {
             let (metrics, bitmap) = face.rasterize(ch, size);
             Glyph { metrics, bitmap }
@@ -562,6 +598,7 @@ impl Renderer {
     /// Paint one optional tab row, reusing the terminal's own rasterizer.
     /// No allocations beyond the tiny active tab snapshot passed in by App.
     /// This never modifies the underlying PTY or screen grids.
+    #[allow(clippy::too_many_arguments)] // Explicit pixel geometry and tab state.
     pub fn draw_tab_bar(
         &mut self,
         pixels: &mut [u32],
@@ -656,8 +693,8 @@ impl Renderer {
             return;
         }
         let lines = help::lines(macos);
-        let cols = screen.cols.saturating_sub(4).min(75).max(1);
-        let visible = screen.rows.saturating_sub(5).min(23).max(1);
+        let cols = screen.cols.saturating_sub(4).clamp(1, 75);
+        let visible = screen.rows.saturating_sub(5).clamp(1, 23);
         let panel_w = (cols + 4).saturating_mul(self.cell_width).min(width);
         let panel_h = (visible + 3).saturating_mul(self.cell_height).min(height);
         let left = (width - panel_w) / 2;
@@ -701,7 +738,7 @@ impl Renderer {
         if width == 0 || height == 0 || self.cell_width == 0 || self.cell_height == 0 {
             return;
         }
-        let cols = screen.cols.saturating_sub(4).min(88).max(1);
+        let cols = screen.cols.saturating_sub(4).clamp(1, 88);
         let visible = url_picker::visible_rows(screen.rows);
         let panel_w = (cols + 4).saturating_mul(self.cell_width).min(width);
         let panel_h = (visible + 6).saturating_mul(self.cell_height).min(height);
@@ -1667,6 +1704,7 @@ fn cell_colors_with_cursor(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Pixel rectangle geometry.
 fn rect(
     pixels: &mut [u32],
     stride: usize,
@@ -1926,11 +1964,9 @@ mod tests {
 
     #[test]
     fn ink_bounds_ignore_transparent_bearings() {
-        let mut metrics = Metrics::default();
-        metrics.width = 5;
-        metrics.height = 4;
+        let metrics = Metrics { width: 5, height: 4, ..Metrics::default() };
         let mut bitmap = vec![0; 20];
-        bitmap[1 * 5 + 2] = 255;
+        bitmap[5 + 2] = 255;
         bitmap[2 * 5 + 3] = 255;
         let glyph = Glyph { metrics, bitmap };
         assert_eq!(visible_ink_bounds(&glyph), Some(InkBounds {
@@ -1970,20 +2006,12 @@ mod tests {
 
     #[test]
     fn glyph_rect_never_overflows_cell() {
-        let mut oversized = Metrics::default();
-        oversized.width = 28;
-        oversized.height = 45;
-        oversized.xmin = -7;
-        oversized.ymin = -10;
+        let oversized = Metrics { width: 28, height: 45, xmin: -7, ymin: -10, ..Metrics::default() };
         let rect = place_glyph(&oversized, 10, 20, 12, 22, 16, false);
         assert!(rect.x >= 10 && rect.x + rect.width <= 22);
         assert!(rect.y >= 20 && rect.y + rect.height <= 42);
 
-        let mut overhanging = Metrics::default();
-        overhanging.width = 10;
-        overhanging.height = 17;
-        overhanging.xmin = -3;
-        overhanging.ymin = -9;
+        let overhanging = Metrics { width: 10, height: 17, xmin: -3, ymin: -9, ..Metrics::default() };
         let rect = place_glyph(&overhanging, 10, 20, 12, 22, 16, false);
         assert_eq!(rect.width, 10);
         assert_eq!(rect.x, 10);
@@ -1996,7 +2024,7 @@ mod tests {
         draw_powerline(&mut pixels, 12, 20, 0, 0, 12, 20, '\u{e0b0}', 0xffffff);
         assert_eq!(pixels[10 * 12], 0xffffff); // center, left edge
         assert!(pixels[10 * 12 + 11] > 0); // center, sharp right tip
-        assert_eq!(pixels[0 * 12 + 11], 0); // top right stays transparent
+        assert_eq!(pixels[11], 0); // top right stays transparent
     }
 
     #[test]
@@ -2081,7 +2109,7 @@ mod tests {
         let style = style_from_sgr(b"\x1b[4;9mX");
         let mut pixels = vec![0u32; 11 * 7];
         paint_decorations(&mut pixels, 11, 7, 8, 3, 6, 4, 50, 28.0, style, 0xff00ff);
-        assert!(pixels.iter().any(|&pixel| pixel == 0xff00ff));
+        assert!(pixels.contains(&0xff00ff));
         for row in 0..7 {
             assert!(pixels[row * 11..row * 11 + 8].iter().all(|&pixel| pixel == 0));
         }
@@ -2095,6 +2123,31 @@ mod tests {
         assert!(!hidden.visible(false));
         assert!(blink.visible(true));
         assert!(!blink.visible(false));
+    }
+
+    #[test]
+    fn style_fonts_are_lazy_and_glyph_cache_stays_bounded() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return; };
+        for face in renderer.styled_fonts.iter().flatten().flatten() {
+            assert!(face.parsed.get().is_none());
+        }
+        if let Some(face) = renderer.styled_fonts.iter().flatten().flatten().next() {
+            let first = face.font().map(|font| font as *const Font);
+            assert!(face.parsed.get().is_some());
+            assert_eq!(first, face.font().map(|font| font as *const Font));
+        }
+        for ch in (0..MAX_GLYPH_CACHE_ENTRIES as u32).filter_map(char::from_u32) {
+            renderer.glyphs.insert((usize::MAX, 0, ch), Glyph {
+                metrics: Metrics::default(), bitmap: vec![],
+            });
+        }
+        assert_eq!(renderer.glyphs.len(), MAX_GLYPH_CACHE_ENTRIES);
+        renderer.glyph('A', TextStyle::default());
+        assert_eq!(renderer.glyphs.len(), 1);
+        renderer.glyph('A', TextStyle::default());
+        assert_eq!(renderer.glyphs.len(), 1);
     }
 
     #[test]
@@ -2132,7 +2185,7 @@ mod tests {
         paint_cursor(&mut pixels, 10, 8, &screen, 5, 4, 0);
         for x in 0..5 {
             assert_eq!(pixels[3 * 10 + x], screen.palette.cursor);
-            assert_eq!(pixels[0 * 10 + x], 0x112233);
+            assert_eq!(pixels[x], 0x112233);
         }
         assert_eq!(pixels[3 * 10 + 5], screen.palette.background);
     }
@@ -2266,7 +2319,7 @@ mod tests {
         paint_bell_border(&mut pixels, 10, 8, 0xffcc00);
         for y in 0..8 {
             for x in 0..10 {
-                let expected = if x < 2 || x >= 8 || y < 2 || y >= 6 {
+                let expected = if !(2..8).contains(&x) || !(2..6).contains(&y) {
                     0xffcc00
                 } else {
                     0x112233
@@ -2445,7 +2498,7 @@ mod tests {
         assert_eq!(term.screen.grid[0][0].ch, 'h');
         assert_eq!(term.screen.grid[0][1].ch, 'e');
         assert!(term.screen.history.is_empty());
-        assert!(pixels.iter().any(|&pixel| pixel == term.screen.palette.selection));
+        assert!(pixels.contains(&term.screen.palette.selection));
     }
 
 
@@ -2682,7 +2735,7 @@ mod tests {
         let mut pixels = vec![0x101010; 8 * 6];
         blend_rect(&mut pixels, 8, 6, 2, 1, 3, 2, 0x00ff00, 255);
         assert_eq!(pixels[0], 0x101010);
-        assert_eq!(pixels[1 * 8 + 2], 0x00ff00);
+        assert_eq!(pixels[8 + 2], 0x00ff00);
         assert_eq!(pixels[2 * 8 + 4], 0x00ff00);
         assert_eq!(pixels[3 * 8 + 3], 0x101010);
         blend_rect(&mut pixels, 8, 6, 100, 100, 30, 30, 0xff0000, 255);
@@ -2691,4 +2744,20 @@ mod tests {
         assert_eq!(pixels[0], 0x101010);
     }
 
+}
+
+#[cfg(test)]
+mod startup_benchmark {
+    #[test]
+    #[ignore = "manual font startup benchmark; depends on installed fonts"]
+    fn font_loading() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            let renderer = super::Renderer::new(&config.font, config.window.padding, 1.0).unwrap();
+            eprintln!("font startup: {:?}, {} regular faces", start.elapsed(), renderer.fonts.len());
+            std::hint::black_box(renderer);
+        }
+    }
 }

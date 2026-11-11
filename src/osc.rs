@@ -31,7 +31,8 @@ pub fn parse_color(input: &[u8]) -> Option<u32> {
             component(&hex[len..2 * len])?,
             component(&hex[2 * len..])?,
         )
-    } else if let Some(rgb) = text.strip_prefix("rgb:") {
+    } else {
+        let rgb = text.strip_prefix("rgb:")?;
         let mut parts = rgb.split('/');
         let r = component(parts.next()?)?;
         let g = component(parts.next()?)?;
@@ -40,8 +41,6 @@ pub fn parse_color(input: &[u8]) -> Option<u32> {
             return None;
         }
         (r, g, b)
-    } else {
-        return None;
     };
     Some((r << 16) | (g << 8) | b)
 }
@@ -75,7 +74,7 @@ pub fn clipboard_write(selection: &[u8], payload: &[u8]) -> Option<String> {
     if selection.is_empty() || !selection.iter().all(|b| matches!(*b, b'c' | b'p' | b's' | b'0'..=b'7')) {
         return None;
     }
-    if payload.is_empty() || payload == b"?" || payload.len() > (MAX_OSC52_BYTES + 2) / 3 * 4 {
+    if payload.is_empty() || payload == b"?" || payload.len() > MAX_OSC52_BYTES.div_ceil(3) * 4 {
         return None;
     }
     let decoded = base64::engine::general_purpose::STANDARD.decode(payload).ok()?;

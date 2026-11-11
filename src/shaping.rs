@@ -7,16 +7,13 @@ use rustybuzz::{Face, UnicodeBuffer};
 
 #[derive(Clone)]
 pub struct FontBytes {
-    pub bytes: Vec<u8>,
+    pub bytes: std::sync::Arc<[u8]>,
     pub face_index: u32,
 }
 
 #[derive(Clone, Debug)]
 pub struct ShapedGlyph {
     pub index: u16,
-    /// Original UTF-8 byte offset; useful for mapping substitutions back
-    /// to the authoritative terminal cell range.
-    pub cluster: u32,
     /// Positions in face design units (scaled to pixels by the renderer).
     pub x_advance: i32,
     pub x_offset: i32,
@@ -33,7 +30,7 @@ pub struct ShapedText {
 /// Skip expensive shaper setup for ordinary plain ASCII terminal output.
 /// Keep ligature candidates and non-ASCII (Arabic/Indic, combining, etc.).
 pub fn needs_shaping(text: &str, ligatures: bool) -> bool {
-    if text.chars().any(|ch| !ch.is_ascii()) {
+    if !text.is_ascii() {
         return true;
     }
     ligatures
@@ -65,7 +62,6 @@ pub fn shape(source: &FontBytes, text: &str, ligatures: bool) -> Option<ShapedTe
             total_advance += pos.x_advance as i64;
             ShapedGlyph {
                 index: info.glyph_id as u16,
-                cluster: info.cluster,
                 x_advance: pos.x_advance,
                 x_offset: pos.x_offset,
                 y_offset: pos.y_offset,
@@ -99,14 +95,14 @@ mod tests {
 
     #[test]
     fn corrupt_or_empty_fonts_do_not_crash_the_renderer() {
-        let font = FontBytes { bytes: vec![1, 2, 3], face_index: 0 };
+        let font = FontBytes { bytes: vec![1, 2, 3].into(), face_index: 0 };
         assert!(shape(&font, "fi", true).is_none());
         assert!(shape(&font, "", true).is_none());
     }
 
     #[test]
     fn very_large_shaping_input_is_refused() {
-        let font = FontBytes { bytes: vec![], face_index: 0 };
+        let font = FontBytes { bytes: vec![].into(), face_index: 0 };
         assert!(shape(&font, &"a".repeat(5000), true).is_none());
     }
 }

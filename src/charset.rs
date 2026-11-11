@@ -104,7 +104,7 @@ mod tests {
     fn designation_accepts_only_original_st_graphics_and_ascii() {
         assert_eq!(CharacterSet::designate(b'0'), Some(CharacterSet::DecSpecialGraphics));
         assert_eq!(CharacterSet::designate(b'B'), Some(CharacterSet::Ascii));
-        for other in [b'A', b'1', b'2', b'9', b'C', b'Z'] {
+        for other in *b"A129CZ" {
             assert_eq!(CharacterSet::designate(other), None);
         }
     }

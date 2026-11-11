@@ -700,7 +700,7 @@ impl App {
 
     fn handle_help_key(&mut self, key: &Key<&str>) {
         let lines = help::lines(cfg!(target_os = "macos")).len();
-        let visible = self.terminal.screen.rows.saturating_sub(5).min(23).max(1);
+        let visible = self.terminal.screen.rows.saturating_sub(5).clamp(1, 23);
         let limit = lines.saturating_sub(visible);
         match key {
             Key::Named(NamedKey::Escape) => self.toggle_help(),
@@ -1358,7 +1358,7 @@ impl ApplicationHandler<UserEvent> for App {
                         MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
                         MouseScrollDelta::PixelDelta(pos) => (pos.y / 24.0).round() as i32,
                     };
-                    let visible = self.terminal.screen.rows.saturating_sub(5).min(23).max(1);
+                    let visible = self.terminal.screen.rows.saturating_sub(5).clamp(1, 23);
                     let limit = help::lines(cfg!(target_os = "macos")).len()
                         .saturating_sub(visible);
                     if amount > 0 {

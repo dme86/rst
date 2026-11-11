@@ -20,7 +20,8 @@ toml = "0.9"
 unicode-width = "0.2"
 unicode-segmentation = "1.12"
 unicode-normalization = "0.1"
-vte = "0.15"
+# A fixed OSC buffer prevents unterminated escape strings growing without limit.
+vte = { version = "0.15", default-features = false }
 winit = { version = "0.30.13", default-features = false, features = ["wayland", "rwh_06"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
