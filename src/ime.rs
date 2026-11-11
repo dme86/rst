@@ -103,8 +103,8 @@ pub fn floor_char_boundary(text: &str, byte_index: usize) -> usize {
 fn grapheme_width(text: &str) -> usize {
     // A grapheme must not be split between two terminal cells. unicode-width
     // covers CJK, combining marks and most emoji sequences. The renderer
-    // itself is still glyph-based, so complex ligature shaping remains
-    // outside rst's current rendering engine.
+    // painting is run-based with Rustybuzz, while terminal cells still
+    // define the maximum horizontal advance.
     UnicodeWidthStr::width(text).clamp(1, 2)
 }
 
