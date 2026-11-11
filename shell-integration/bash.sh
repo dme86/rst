@@ -21,7 +21,7 @@ __rst_preexec() {
 # Append our hook *last* so an older Bash DEBUG trap does not fire while
 # running an existing prompt function. Never overwrite a user's DEBUG trap.
 if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )); then
-    PS0="${PS0:-}"'\[\033]133;C\a\]'
+    PS0="${PS0:-}"'\033]133;C\a'
 else
     __rst_debug_trap_available=0
     if [[ -z $(trap -p DEBUG) ]]; then
