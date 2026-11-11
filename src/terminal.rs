@@ -654,19 +654,24 @@ impl Screen {
         } else {
             None
         };
-        if let Some((mut x, y)) = previous {
-            if self.grid[y][x].width == 0 && x > 0 {
-                x -= 1;
-            }
-            let cell = &self.grid[y][x];
-            let same_grapheme = {
-                let mut candidate = cell.text();
-                candidate.push(ch);
-                UnicodeSegmentation::graphemes(candidate.as_str(), true).count() == 1
-            };
-            if width == 0 || same_grapheme {
-                self.grid[y][x].append_combining(ch);
-                return;
+        // Ordinary ASCII cannot extend a preceding grapheme. Avoid a
+        // String allocation and Unicode segmentation for every character
+        // in a high-throughput shell/tmux output stream.
+        if width == 0 || !ch.is_ascii() {
+            if let Some((mut x, y)) = previous {
+                if self.grid[y][x].width == 0 && x > 0 {
+                    x -= 1;
+                }
+                let cell = &self.grid[y][x];
+                let same_grapheme = {
+                    let mut candidate = cell.text();
+                    candidate.push(ch);
+                    UnicodeSegmentation::graphemes(candidate.as_str(), true).count() == 1
+                };
+                if width == 0 || same_grapheme {
+                    self.grid[y][x].append_combining(ch);
+                    return;
+                }
             }
         }
         if width == 0 || width > 2 {
