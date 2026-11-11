@@ -543,8 +543,21 @@ impl Screen {
             return;
         }
         let blank = self.blank();
+        let width_changed = cols != self.cols;
         for row in &mut self.grid {
             row.resize(cols, blank);
+            if width_changed {
+                for cell in row { cell.wrapped = false; }
+            }
+        }
+        // Scrollback rows are also addressable by display_row(). Keep them
+        // exactly as wide as the viewport to avoid out-of-bounds selection
+        // and rendering after a terminal resize.
+        for row in &mut self.history {
+            row.resize(cols, blank);
+            if width_changed {
+                for cell in row { cell.wrapped = false; }
+            }
         }
         if rows > self.rows {
             self.grid.extend(vec![vec![blank; cols]; rows - self.rows]);
@@ -554,6 +567,9 @@ impl Screen {
         if let Some(saved) = &mut self.alternate {
             for row in &mut saved.grid {
                 row.resize(cols, blank);
+                if width_changed {
+                    for cell in row { cell.wrapped = false; }
+                }
             }
             saved.grid.resize(rows, vec![blank; cols]);
             saved.x = saved.x.min(cols - 1);
