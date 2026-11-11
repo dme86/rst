@@ -2044,4 +2044,43 @@ mod tests {
         assert!(pixels.iter().any(|&pixel| pixel == term.screen.palette.selection));
     }
 
+
+    #[test]
+    fn help_popup_draws_over_pixels_without_mutating_terminal_cells() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(80, 26, 0, palette);
+        term.advance(b"normal terminal output");
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &term.screen, None, None);
+        let baseline = pixels.clone();
+        renderer.draw_help_overlay(&mut pixels, width, height, &term.screen, 0, true);
+        assert_ne!(pixels, baseline);
+        assert_eq!(term.screen.grid[0][0].ch, 'n');
+        assert_eq!(term.screen.grid[0][1].ch, 'o');
+        assert!(term.screen.history.is_empty());
+    }
+
+    #[test]
+    fn copy_confirmation_overlay_clips_in_small_windows() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let term = crate::terminal::Terminal::new(4, 2, 0, palette);
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw_help_overlay(&mut pixels, width, height, &term.screen, 200, false);
+        renderer.draw_toast(
+            &mut pixels, width, height, &term.screen,
+            "No command markers: run rst --install-shell-integration",
+        );
+        assert!(pixels.iter().any(|&px| px != 0));
+    }
+
 }
