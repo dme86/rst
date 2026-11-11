@@ -267,6 +267,13 @@ impl App {
         false
     }
 
+    fn terminate_all_tabs(&mut self) {
+        self.pty.terminate();
+        for tab in &mut self.inactive_tabs {
+            tab.pty.terminate();
+        }
+    }
+
     fn resize_terminal(&mut self) {
         let (Some(window), Some(renderer)) = (&self.window, &self.renderer) else {
             return;
@@ -1084,7 +1091,10 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.terminate_all_tabs();
+                event_loop.exit();
+            },
             WindowEvent::Resized(_) => self.resize_terminal(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(renderer) = self.renderer.as_mut() {
