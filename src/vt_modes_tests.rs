@@ -268,3 +268,115 @@ fn dec_saved_cursor_preserves_deferred_wrap_at_right_margin() {
     assert_eq!(t.screen.grid[1][0].ch, 'Z');
     assert_eq!((t.screen.x, t.screen.y), (1, 1));
 }
+
+#[test]
+fn decrqm_reports_standard_and_dec_private_modes_without_changing_them() {
+    let mut t = term(12, 5);
+    t.advance(b"\x1b[4$p\x1b[?6$p\x1b[?7$p\x1b[?1006$p\x1b[?9999$p");
+    assert_eq!(
+        t.screen.take_replies(),
+        b"\x1b[4;2$y\x1b[?6;2$y\x1b[?7;1$y\x1b[?1006;2$y\x1b[?9999;0$y"
+    );
+    assert!(!t.screen.insert_mode);
+    assert!(t.screen.auto_wrap);
+
+    t.advance(b"\x1b[4;20h\x1b[?6;1002;1006;1004h");
+    t.advance(b"\x1b[4$p\x1b[20$p\x1b[?6$p\x1b[?1002$p\x1b[?1000$p\x1b[?1006$p\x1b[?1004$p");
+    assert_eq!(
+        t.screen.take_replies(),
+        b"\x1b[4;1$y\x1b[20;1$y\x1b[?6;1$y\x1b[?1002;1$y\x1b[?1000;2$y\x1b[?1006;1$y\x1b[?1004;1$y"
+    );
+    assert_eq!(t.screen.mouse_tracking, MouseTracking::ButtonMotion);
+}
+
+#[test]
+fn decrqm_cannot_toggle_modes_and_unknown_queries_are_safe() {
+    let mut t = term(10, 3);
+    t.advance(b"\x1b[?7l");
+    t.advance(b"\x1b[?7$p\x1b[?1234$p\x1b[9999$p");
+    assert!(!t.screen.auto_wrap);
+    assert_eq!(
+        t.screen.take_replies(),
+        b"\x1b[?7;2$y\x1b[?1234;0$y\x1b[9999;0$y"
+    );
+}
+
+#[test]
+fn decstr_soft_reset_preserves_main_screen_and_scrollback() {
+    let mut t = term(8, 3);
+    t.advance(b"0\r\n1\r\n2\r\n3");
+    let previous_history = t.screen.history.len();
+    t.advance(b"\x1b[2;3r\x1b[?6h\x1b[?7l\x1b[4h\x1b[3;31m");
+    t.advance(b"\x1b[?1002;1006;1004h\x1b[1;3H");
+    assert!(!t.screen.auto_wrap);
+    assert!(t.screen.origin_mode);
+    assert!(t.screen.insert_mode);
+    t.advance(b"\x1b[!p");
+    assert!(!t.screen.origin_mode);
+    assert!(t.screen.auto_wrap);
+    assert!(!t.screen.insert_mode);
+    assert!(!t.screen.focus_reporting);
+    assert!(!t.screen.mouse_sgr);
+    assert_eq!(t.screen.mouse_tracking, MouseTracking::Off);
+    assert_eq!((t.screen.x, t.screen.y), (0, 0));
+    assert_eq!((t.screen.scroll_top, t.screen.scroll_bottom), (0, 3));
+    assert_eq!(t.screen.history.len(), previous_history);
+    assert_eq!(t.screen.grid[0][0].ch, '1');
+    assert_eq!(t.screen.grid[1][0].ch, '2');
+    assert_eq!(t.screen.grid[2][0].ch, '3');
+    t.advance(b"X");
+    assert_eq!(t.screen.grid[0][0].fg, t.screen.palette.foreground);
+    assert_eq!(t.screen.grid[0][0].style, TextStyle::default());
+}
+
+#[test]
+fn decstr_does_not_destroy_alternate_screen_buffer() {
+    let mut t = term(8, 3);
+    t.advance(b"main\x1b[?1049halt\x1b[3;31m");
+    assert!(t.screen.in_alternate_screen());
+    t.advance(b"\x1b[!p");
+    assert!(t.screen.in_alternate_screen());
+    assert_eq!(t.screen.grid[0][0].ch, 'a');
+    assert_eq!((t.screen.x, t.screen.y), (0, 0));
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.screen.grid[0][0].ch, 'm');
+}
+
+#[test]
+fn decstr_retains_custom_tab_stops_but_ris_clears_them() {
+    let mut t = term(16, 2);
+    t.advance(b"\x1b[3g\x1b[4G\x1bH\x1b[!p\t");
+    assert_eq!(t.screen.x, 3);
+    t.advance(b"\x1bc\t");
+    assert_eq!(t.screen.x, 8);
+}
+
+#[test]
+fn decaln_alignment_fills_screen_without_moving_cursor_or_losing_style() {
+    let mut t = term(5, 3);
+    t.advance(b"\x1b[3;31m\x1b[2;3H\x1b#8");
+    assert_eq!((t.screen.x, t.screen.y), (2, 1));
+    for row in &t.screen.grid {
+        for cell in row {
+            assert_eq!(cell.ch, 'E');
+            assert_eq!(cell.fg, t.screen.palette.ansi[1]);
+            assert!(cell.style.contains(TextStyle::ITALIC));
+        }
+    }
+    t.advance(b"\x1b[?1049h\x1b#8");
+    assert!(t.screen.in_alternate_screen());
+    assert_eq!(t.screen.grid[2][4].ch, 'E');
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.screen.grid[2][4].ch, 'E');
+}
+
+#[test]
+fn decaln_unknown_intermediates_do_not_trigger_cursor_restore() {
+    let mut t = term(5, 3);
+    t.advance(b"\x1b[2;3H\x1b7\x1b[1;1H");
+    // Unknown ESC # 7 must not behave like ESC 7 or ESC 8.
+    t.advance(b"\x1b#7");
+    assert_eq!((t.screen.x, t.screen.y), (0, 0));
+    t.advance(b"\x1b8");
+    assert_eq!((t.screen.x, t.screen.y), (2, 1));
+}

@@ -668,6 +668,72 @@ impl Screen {
         out
     }
 
+    /// DECRQM (CSI ? Ps $ p / CSI Ps $ p): report the current state
+    /// of recognized modes without accidentally modifying the terminal.
+    /// 1 = set, 2 = reset, 0 = unknown/unsupported.
+    fn report_mode(&mut self, mode: u16, private: bool) {
+        let value = if private {
+            match mode {
+                1 => Some(self.app_cursor),
+                5 => Some(self.reverse_video),
+                6 => Some(self.origin_mode),
+                7 => Some(self.auto_wrap),
+                25 => Some(self.show_cursor),
+                9 => Some(self.mouse_tracking == MouseTracking::X10),
+                1000 => Some(self.mouse_tracking == MouseTracking::Button),
+                1002 => Some(self.mouse_tracking == MouseTracking::ButtonMotion),
+                1003 => Some(self.mouse_tracking == MouseTracking::AnyMotion),
+                1004 => Some(self.focus_reporting),
+                1006 => Some(self.mouse_sgr),
+                47 | 1047 | 1049 => Some(self.in_alternate_screen()),
+                2004 => Some(self.bracketed_paste),
+                _ => None,
+            }
+        } else {
+            match mode {
+                2 => Some(self.keyboard_lock),
+                4 => Some(self.insert_mode),
+                20 => Some(self.newline_mode),
+                _ => None,
+            }
+        };
+        let state = match value {
+            Some(true) => 1,
+            Some(false) => 2,
+            None => 0,
+        };
+        let prefix = if private { "?" } else { "" };
+        self.replies.extend_from_slice(
+            format!("\x1b[{prefix}{mode};{state}$y").as_bytes(),
+        );
+    }
+
+    /// DECSTR (CSI ! p) resets cursor modes and attributes without clearing
+    /// the grid, scrollback, or an application's alternate-screen content.
+    fn soft_reset(&mut self) {
+        self.origin_mode = false;
+        self.auto_wrap = true;
+        self.insert_mode = false;
+        self.newline_mode = false;
+        self.keyboard_lock = false;
+        self.app_cursor = false;
+        self.app_keypad = false;
+        self.reverse_video = false;
+        self.show_cursor = true;
+        self.mouse_tracking = MouseTracking::Off;
+        self.mouse_sgr = false;
+        self.focus_reporting = false;
+        self.bracketed_paste = false;
+        self.style = TextStyle::default();
+        self.fg = self.palette.foreground;
+        self.bg = self.palette.background;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows;
+        self.wrap_pending = false;
+        self.home_cursor();
+        self.save_cursor();
+    }
+
     fn set_standard_mode(&mut self, mode: u16, enabled: bool) {
         match mode {
             2 => self.keyboard_lock = enabled, // KAM
@@ -773,6 +839,16 @@ impl Perform for Screen {
             .collect();
         let n = |index: usize| values.get(index).copied().unwrap_or(0).max(1) as usize;
         let private = intermediates.contains(&b'?');
+        if action == 'p' && intermediates.contains(&b'$') {
+            for mode in values.iter().copied() {
+                self.report_mode(mode, private);
+            }
+            return;
+        }
+        if action == 'p' && intermediates.contains(&b'!') && !private {
+            self.soft_reset();
+            return;
+        }
         if private {
             if action == 'h' || action == 'l' {
                 for mode in values.iter().copied() {
@@ -892,8 +968,30 @@ impl Perform for Screen {
         }
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], ignore: bool, action: u8) {
+    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, action: u8) {
         if ignore {
+            return;
+        }
+        if intermediates == b"#" {
+            if action == b'8' {
+                // DECALN: fill the current screen with E, matching st's
+                // screen alignment test, without changing cursor/margins.
+                let (fg, bg) = self.ink_colors();
+                let cell = Cell {
+                    ch: 'E',
+                    width: 1,
+                    fg,
+                    bg,
+                    style: self.style,
+                };
+                for row in &mut self.grid {
+                    row.fill(cell);
+                }
+                self.view_offset = 0;
+            }
+            return;
+        }
+        if !intermediates.is_empty() {
             return;
         }
         match action {
