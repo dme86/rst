@@ -77,6 +77,19 @@ vendor or translate upstream C source.
 - Byte-stream parser behavior verified with regression vectors in
   `src/vt_modes_tests.rs` and reverse-video render tests
 
+## VT/DEC device control extension
+
+- DECRQM reports set/reset/unsupported mode status for recognized standard
+  and private modes without mutating terminal state.
+- DECSTR resets cursor modes, SGR, margins and pointer reporting while
+  preserving the grid and scrollback, unlike RIS.
+- DECALN implements upstream st's `tdectest` alignment fill (ESC # 8);
+  the escape dispatcher rejects unknown intermediates instead of running
+  a superficially similar plain ESC command.
+- Byte-stream regression tests are in `src/vt_modes_tests.rs`.
+- This milestone does not imply complete VT/DEC parity: advanced DCS,
+  DECSLRM, protection attributes and many device status queries remain.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
