@@ -1068,7 +1068,11 @@ impl ApplicationHandler<UserEvent> for App {
         // Query only the owned PTYs' foreground process groups, at a
         // bounded frequency while a command/TUI is running. There is no
         // process-tree scan, external 'ps', or per-frame process lookup.
-        if self.config.tabs.enabled && self.window.is_some() && self.has_foreground_job() {
+        if self.config.tabs.enabled
+            && self.config.tabs.name_mode == "smart"
+            && self.window.is_some()
+            && self.has_foreground_job()
+        {
             if now >= self.next_process_probe {
                 if self.refresh_foreground_process_names() {
                     if let Some(window) = &self.window {
