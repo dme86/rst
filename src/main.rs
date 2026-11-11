@@ -1425,6 +1425,10 @@ impl ApplicationHandler<UserEvent> for App {
                         if tab.terminal.screen.tab_label_revision != old_revision {
                             became_unread = true; // Only metadata changes repaint hidden tabs.
                         }
+                        if !Self::tab_may_have_foreground_job(&tab.terminal.screen) {
+                            // The shell reached its prompt again.
+                            became_unread |= tab.pty.clear_foreground_name();
+                        }
                         let replies = tab.terminal.screen.take_replies();
                         if !replies.is_empty() { tab.pty.write(&replies); }
                         // Do not allow a hidden tab to steal the clipboard
@@ -1449,6 +1453,9 @@ impl ApplicationHandler<UserEvent> for App {
                 let previous_title = self.terminal.screen.title.clone();
                 let previous_cursor_style = self.terminal.screen.cursor_style;
                 self.terminal.advance(&bytes);
+                if !Self::tab_may_have_foreground_job(&self.terminal.screen) {
+                    let _ = self.pty.clear_foreground_name();
+                }
                 if self.terminal.screen.take_bells() != 0 {
                     self.handle_bell();
                 }
