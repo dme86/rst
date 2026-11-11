@@ -27,6 +27,71 @@ Other targets: `make build`, `make release`, `make test`, `make fmt`, `make lint
 
 The optional configuration file is `~/.config/rst/config.toml` (or `$XDG_CONFIG_HOME/rst/config.toml`). Defaults are embedded in the executable; see [`config/default.toml`](config/default.toml).
 
+### Copy the last command output + in-app help
+
+rst recognizes **OSC 133** shell integration markers, so it can copy
+**only the last command's output** (stdout and stderr on the PTY), without
+the shell prompt, command line, or ANSI escape codes. It captures decoded
+UTF-8 text independently of the scrollback limit and retains the current
+running command as well as the last completed command.
+
+**Shortcuts:**
+
+| Action | macOS | Wayland |
+| --- | --- | --- |
+| Copy last command output | **Cmd+Shift+O** | **Ctrl+Shift+O** |
+| Show/close keyboard help popup | **F1** or **Cmd+Shift+H** | **F1** or **Ctrl+Shift+H** |
+| Close help | **Esc** | **Esc** |
+| Scroll help | Arrow keys, PgUp/PgDn, mouse wheel | Same |
+
+The help popup is drawn inside rst. It lists clipboard, font, selection,
+scrollback, shell integration and help shortcuts, with scrolling on small
+windows. A short status message confirms success or explains why no output
+is available, and closes automatically. Neither the popup nor the status
+message alters terminal cells or sends text to the PTY.
+
+**One-time setup** for bash, zsh and fish:
+
+```sh
+make shell-integration
+```
+
+If you already installed the executable, run
+`rst --install-shell-integration` instead. This explicitly installs
+the bundled shell scripts under `$XDG_CONFIG_HOME/rst/shell-integration`
+(or `~/.config/rst/shell-integration`) and appends a small, idempotent
+source hook to `.bashrc`, `.zshrc` and `config.fish`. Existing shell settings
+are preserved; **normal rst startup never changes dotfiles**.
+Open a **new rst window** after installation. Hooks activate only when
+`TERM_PROGRAM=rst`. For zsh, source the integration at the end of `.zshrc`
+after your theme or prompt framework; the installer appends it there.
+
+Example:
+
+```sh
+kubectl logs deployment/my-service --tail=2000
+# Press Cmd+Shift+O (macOS) / Ctrl+Shift+O (Wayland).
+```
+
+Copying a running command (such as `tail -f`) copies its output so far.
+The decoder preserves Unicode, replaces carriage-return progress text and
+honors simple `CSI K` line erasure; it does not reproduce arbitrary
+full-screen cursor-addressed graphics. Shell integration must also be
+installed in remote SSH shells if commands there should be distinguished.
+Within tmux, OSC 133 forwarding needs terminal-passthrough configuration.
+
+The cap is **32 MiB per command**, independent of `[scrollback].lines`:
+
+```toml
+[command_output]
+max_megabytes = 32 # allowed range 1..128
+```
+
+If the cap is reached, rst reports the overflow **rather than silently
+copying a truncated command**. Only text is copied, never raw control
+sequences. Clipboard writes require `[clipboard].enabled = true` but do
+not require OSC 52 clipboard write permissions.
+
 ### Default colors
 
 The bundled default terminal background is `#282828`. If your existing
@@ -411,7 +476,7 @@ To inspect which font families rst found and identify missing glyph codepoints, 
 
 ## Scope
 
-One window and one PTY, with an owned terminal grid, ANSI parser, basic VT operations, 24-bit color, font fallback, bounded scrollback and native copy/paste. No tabs, shell integration, Electron, GTK, X11, or XWayland. On Linux, the windowing backend is **Wayland-only**.
+One window and one PTY, with an owned terminal grid, ANSI parser, basic VT operations, 24-bit color, font fallback, bounded scrollback and native copy/paste. No tabs, Electron, GTK, X11, or XWayland; shell integration is opt-in. On Linux, the windowing backend is **Wayland-only**.
 
 This is a work-in-progress: extended VT modes, full bidirectional layout, color emoji rasterization, complete alt-screen compatibility and richer OSC security prompts remain to be implemented/tested. Linux clipboard integration currently relies on compositor data-control support; the macOS native clipboard is the primary first-run target.
 

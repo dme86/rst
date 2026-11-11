@@ -1,6 +1,8 @@
 mod attention;
 mod charset;
+mod command_capture;
 mod config;
+mod help;
 mod ime;
 mod keyboard;
 mod mouse;
@@ -8,6 +10,7 @@ mod osc;
 mod pty;
 mod render;
 mod selection;
+mod shell_integration;
 mod shaping;
 mod terminal;
 
@@ -28,6 +31,7 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 use crate::{
     attention::{BellLimiter, FocusTracker, VISUAL_BELL_DURATION},
+    command_capture::CommandCapture,
     config::Config,
     keyboard::{encode_key, KeyboardModes},
     ime::ImeState,
@@ -59,6 +63,9 @@ struct App {
     focus: FocusTracker,
     bell_limiter: BellLimiter,
     bell_flash_until: Option<Instant>,
+    help_open: bool,
+    help_scroll: usize,
+    toast: Option<(String, Instant)>,
 }
 
 impl App {
@@ -146,6 +153,20 @@ impl App {
                 size.height as usize,
                 self.terminal.screen.palette.cursor,
             );
+        }
+        if self.help_open {
+            renderer.draw_help_overlay(
+                &mut buffer, size.width as usize, size.height as usize,
+                &self.terminal.screen, self.help_scroll, cfg!(target_os = "macos"),
+            );
+        }
+        if let Some((message, until)) = &self.toast {
+            if Instant::now() < *until {
+                renderer.draw_toast(
+                    &mut buffer, size.width as usize, size.height as usize,
+                    &self.terminal.screen, message,
+                );
+            }
         }
         window.pre_present_notify();
         if let Err(err) = buffer.present() {
@@ -262,6 +283,69 @@ impl App {
         self.resize_terminal();
     }
 
+    fn notify(&mut self, message: impl Into<String>) {
+        self.toast = Some((message.into(), Instant::now() + Duration::from_secs(3)));
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn copy_last_output(&mut self) {
+        if !self.config.clipboard.enabled {
+            self.notify("Clipboard access is disabled in config.toml");
+            return;
+        }
+        let text = match self.terminal.screen.command_capture.latest_output() {
+            Ok(text) => text,
+            Err(err) => {
+                self.notify(err.message());
+                return;
+            }
+        };
+        let length = text.len();
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(()) => self.notify(format!("Copied command output ({} bytes)", length)),
+            Err(err) => {
+                eprintln!("rst: command output clipboard: {err}");
+                self.notify("Clipboard unavailable: could not copy command output");
+            }
+        }
+    }
+
+    fn toggle_help(&mut self) {
+        self.help_open = !self.help_open;
+        self.help_scroll = 0;
+        self.ime.clear();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn handle_help_key(&mut self, key: &Key<&str>) {
+        let lines = help::lines(cfg!(target_os = "macos")).len();
+        let visible = self.terminal.screen.rows.saturating_sub(5).min(23).max(1);
+        let limit = lines.saturating_sub(visible);
+        match key {
+            Key::Named(NamedKey::Escape) => self.toggle_help(),
+            Key::Named(NamedKey::ArrowDown) => {
+                self.help_scroll = (self.help_scroll + 1).min(limit);
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            Key::Named(NamedKey::PageDown) => {
+                self.help_scroll = self.help_scroll.saturating_add(visible).min(limit);
+            }
+            Key::Named(NamedKey::PageUp) => {
+                self.help_scroll = self.help_scroll.saturating_sub(visible);
+            }
+            _ => {}
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn reset_cursor_blink(&mut self) {
         if !self.terminal.screen.cursor_style.blink {
             return;
@@ -277,14 +361,30 @@ impl App {
     }
 
     fn handle_key(&mut self, event: KeyEvent) {
-        if event.state != ElementState::Pressed || self.ime.composing() {
-            // While composing, text keys belong to the IME, not the PTY.
-            // winit normally suppresses them; this is a defensive guard.
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        let key = event.logical_key.as_ref();
+        if matches!(key, Key::Named(NamedKey::F1))
+            || command_shortcut(&key, self.modifiers, cfg!(target_os = "macos"), "h")
+        {
+            self.toggle_help();
+            return;
+        }
+        if self.help_open {
+            self.handle_help_key(&key);
+            return;
+        }
+        if self.ime.composing() {
+            // Preedit is never forwarded as ordinary keyboard input.
+            return;
+        }
+        if command_shortcut(&key, self.modifiers, cfg!(target_os = "macos"), "o") {
+            self.copy_last_output();
             return;
         }
         // Typing wakes the cursor and restarts the blink interval.
         self.reset_cursor_blink();
-        let key = event.logical_key.as_ref();
         if let Some(action) = zoom_shortcut(
             &key,
             self.modifiers,
@@ -358,6 +458,23 @@ enum ZoomAction {
     In,
     Out,
     Reset,
+}
+
+fn command_shortcut(
+    key: &Key<&str>,
+    modifiers: ModifiersState,
+    macos: bool,
+    letter: &str,
+) -> bool {
+    let primary = if macos {
+        modifiers.super_key() && !modifiers.control_key()
+    } else {
+        modifiers.control_key() && !modifiers.super_key()
+    };
+    primary
+        && modifiers.shift_key()
+        && !modifiers.alt_key()
+        && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case(letter))
 }
 
 fn zoomed_font_size(current: f32, initial: f32, action: ZoomAction) -> f32 {
@@ -474,6 +591,16 @@ impl ApplicationHandler<UserEvent> for App {
                 next_deadline = Some(next_deadline.map_or(until, |other| other.min(until)));
             }
         }
+        if let Some((_, until)) = &self.toast {
+            if now >= *until {
+                self.toast = None;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            } else {
+                next_deadline = Some(next_deadline.map_or(*until, |old| old.min(*until)));
+            }
+        }
         // No busy redraw when neither blinking nor a bell flash is active.
         event_loop.set_control_flow(
             next_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
@@ -552,6 +679,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(event),
             WindowEvent::Ime(event) => {
+                if self.help_open {
+                    self.ime.clear();
+                    return;
+                }
                 let committed = self.ime.handle(event, self.terminal.screen.keyboard_lock);
                 if let Some(bytes) = committed {
                     if !bytes.is_empty() {
@@ -591,6 +722,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
+                if self.help_open { return; }
                 let tracking = self.terminal.screen.mouse_tracking;
                 if tracking.enabled() && !self.modifiers.shift_key() && !self.selecting {
                     let at = self.cell_at_mouse();
@@ -619,6 +751,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
+                if self.help_open { return; }
                 let tracking = self.terminal.screen.mouse_tracking;
                 let at = self.cell_at_mouse();
                 // Once Shift begins a local selection inside a TUI, finish
@@ -687,6 +820,25 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.help_open {
+                    let amount = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
+                        MouseScrollDelta::PixelDelta(pos) => (pos.y / 24.0).round() as i32,
+                    };
+                    let visible = self.terminal.screen.rows.saturating_sub(5).min(23).max(1);
+                    let limit = help::lines(cfg!(target_os = "macos")).len()
+                        .saturating_sub(visible);
+                    if amount > 0 {
+                        self.help_scroll = self.help_scroll.saturating_sub(amount as usize);
+                    } else {
+                        self.help_scroll = self.help_scroll.saturating_add((-amount) as usize)
+                            .min(limit);
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 let tracking = self.terminal.screen.mouse_tracking;
                 if tracking.enabled() && !self.modifiers.shift_key() {
                     let cell_size = self.renderer.as_ref().map_or(
@@ -794,6 +946,18 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 fn main() -> Result<()> {
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--install-shell-integration"))
+    {
+        let changes = shell_integration::install()?;
+        if changes.is_empty() {
+            println!("rst: shell integration already installed");
+        } else {
+            for line in changes { println!("rst: {line}"); }
+        }
+        println!("rst: open a new rst window to activate shell integration");
+        return Ok(());
+    }
     let config = config::load()?;
     let palette = Palette::try_from(&config.colors)?;
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
@@ -815,6 +979,9 @@ fn main() -> Result<()> {
         palette,
     );
     terminal.screen.osc52_write_allowed = config.clipboard.enabled && config.clipboard.osc52_write;
+    terminal.screen.command_capture = CommandCapture::new(
+        config.command_output.max_megabytes.saturating_mul(1024 * 1024),
+    );
     let shape = match config.cursor.style.as_str() {
         "block" => CursorShape::Block,
         "underline" => CursorShape::Underline,
@@ -849,6 +1016,9 @@ fn main() -> Result<()> {
         focus: FocusTracker::default(),
         bell_limiter: BellLimiter::default(),
         bell_flash_until: None,
+        help_open: false,
+        help_scroll: 0,
+        toast: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -916,6 +1086,22 @@ mod keyboard_tests {
             zoom_shortcut(&Key::Character("x"), cmd, true),
             None
         );
+    }
+
+    #[test]
+    fn copy_output_and_help_shortcuts_are_platform_specific() {
+        let cmd_shift = ModifiersState::SUPER | ModifiersState::SHIFT;
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(command_shortcut(&Key::Character("O"), cmd_shift, true, "o"));
+        assert!(command_shortcut(&Key::Character("o"), ctrl_shift, false, "o"));
+        assert!(command_shortcut(&Key::Character("H"), cmd_shift, true, "h"));
+        assert!(command_shortcut(&Key::Character("h"), ctrl_shift, false, "h"));
+        assert!(!command_shortcut(&Key::Character("o"), ModifiersState::SUPER, true, "o"));
+        assert!(!command_shortcut(&Key::Character("o"), ctrl_shift, true, "o"));
+        assert!(!command_shortcut(&Key::Character("o"), cmd_shift, false, "o"));
+        assert!(!command_shortcut(
+            &Key::Character("o"), cmd_shift | ModifiersState::ALT, true, "o",
+        ));
     }
 
     #[test]

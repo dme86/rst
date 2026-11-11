@@ -38,6 +38,8 @@ impl PtySession {
         let mut command = CommandBuilder::new(&shell);
         command.env("TERM", term);
         command.env("COLORTERM", "truecolor");
+        // Shell hooks activate only inside rst, never in unrelated terminals.
+        command.env("TERM_PROGRAM", "rst");
         let child = pair
             .slave
             .spawn_command(command)

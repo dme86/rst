@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::{
     config::FontConfig,
     ime::{self, Preedit},
+    help,
     shaping::{self, FontBytes, ShapedText},
     terminal::{Cell, CursorShape, Screen, TextStyle},
     selection::Selection,
@@ -552,6 +553,105 @@ impl Renderer {
         }
         if let Some(preedit) = preedit {
             self.draw_preedit(pixels, width, height, screen, preedit);
+        }
+    }
+
+    /// Draw a native-looking, keyboard-driven help panel over the terminal.
+    /// The terminal grid remains untouched and text does not enter the PTY.
+    pub fn draw_help_overlay(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        screen: &Screen,
+        scroll: usize,
+        macos: bool,
+    ) {
+        if width == 0 || height == 0 || self.cell_width == 0 || self.cell_height == 0 {
+            return;
+        }
+        let lines = help::lines(macos);
+        let cols = screen.cols.saturating_sub(4).min(75).max(1);
+        let visible = screen.rows.saturating_sub(5).min(23).max(1);
+        let panel_w = (cols + 4).saturating_mul(self.cell_width).min(width);
+        let panel_h = (visible + 3).saturating_mul(self.cell_height).min(height);
+        let left = (width - panel_w) / 2;
+        let top = (height - panel_h) / 2;
+        let panel = blend(screen.palette.foreground, screen.palette.background, 26);
+        rect(pixels, width, height, left, top, panel_w, panel_h, panel);
+        let border = screen.palette.cursor;
+        rect(pixels, width, height, left, top, panel_w, 2.min(panel_h), border);
+        rect(pixels, width, height, left, top, 2.min(panel_w), panel_h, border);
+        rect(pixels, width, height, left + panel_w.saturating_sub(2), top, 2.min(panel_w), panel_h, border);
+        rect(pixels, width, height, left, top + panel_h.saturating_sub(2), panel_w, 2.min(panel_h), border);
+
+        let text_x = left + 2 * self.cell_width;
+        self.draw_ui_text(pixels, width, height, text_x, top, "rst  /  HELP", border, cols, screen);
+        for (i, line) in help::viewport(&lines, scroll, visible).iter().enumerate() {
+            let y = top + (i + 1) * self.cell_height;
+            if y >= top + panel_h.saturating_sub(self.cell_height) { break; }
+            let color = if line.starts_with("  ") { screen.palette.foreground } else { border };
+            self.draw_ui_text(pixels, width, height, text_x, y, line, color, cols, screen);
+        }
+        let footer = if scroll + visible < lines.len() {
+            "Up/Down scroll   F1 / Esc close    (more below)"
+        } else {
+            "F1 / Esc close    Up/Down scroll"
+        };
+        let bottom = top + panel_h.saturating_sub(self.cell_height);
+        self.draw_ui_text(pixels, width, height, text_x, bottom, footer, border, cols, screen);
+    }
+
+    /// A brief confirmation/error message after a copy shortcut.
+    pub fn draw_toast(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        screen: &Screen,
+        message: &str,
+    ) {
+        if width == 0 || height == 0 || self.cell_width == 0 || self.cell_height == 0 {
+            return;
+        }
+        let cols = message.chars().count().min(screen.cols.saturating_sub(2)).max(1);
+        let panel_w = (cols + 2).saturating_mul(self.cell_width).min(width);
+        let panel_h = (self.cell_height + 6).min(height);
+        let left = width.saturating_sub(panel_w) / 2;
+        let top = height.saturating_sub(panel_h + self.cell_height);
+        rect(pixels, width, height, left, top, panel_w, panel_h, screen.palette.selection);
+        self.draw_ui_text(
+            pixels, width, height,
+            left.saturating_add(self.cell_width), top + 3,
+            message, screen.palette.foreground, cols, screen,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_ui_text(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        x: usize,
+        y: usize,
+        value: &str,
+        color: u32,
+        columns: usize,
+        screen: &Screen,
+    ) {
+        let Some(row) = screen.grid.first() else { return };
+        let Some(&prototype) = row.first() else { return };
+        for (offset, ch) in value.chars().take(columns).enumerate() {
+            if ch == ' ' || ch.is_control() { continue; }
+            let glyph_x = x.saturating_add(offset.saturating_mul(self.cell_width));
+            if glyph_x >= width { break; }
+            let mut cell = prototype;
+            cell.ch = ch;
+            cell.width = 1;
+            cell.style = TextStyle::default();
+            cell.combining_len = 0;
+            self.draw_glyph(pixels, width, height, glyph_x, y, cell, color, (0, 0));
         }
     }
 
@@ -1942,6 +2042,45 @@ mod tests {
         assert_eq!(term.screen.grid[0][1].ch, 'e');
         assert!(term.screen.history.is_empty());
         assert!(pixels.iter().any(|&pixel| pixel == term.screen.palette.selection));
+    }
+
+
+    #[test]
+    fn help_popup_draws_over_pixels_without_mutating_terminal_cells() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(80, 26, 0, palette);
+        term.advance(b"normal terminal output");
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &term.screen, None, None);
+        let baseline = pixels.clone();
+        renderer.draw_help_overlay(&mut pixels, width, height, &term.screen, 0, true);
+        assert_ne!(pixels, baseline);
+        assert_eq!(term.screen.grid[0][0].ch, 'n');
+        assert_eq!(term.screen.grid[0][1].ch, 'o');
+        assert!(term.screen.history.is_empty());
+    }
+
+    #[test]
+    fn copy_confirmation_overlay_clips_in_small_windows() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let term = crate::terminal::Terminal::new(4, 2, 0, palette);
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw_help_overlay(&mut pixels, width, height, &term.screen, 200, false);
+        renderer.draw_toast(
+            &mut pixels, width, height, &term.screen,
+            "No command markers: run rst --install-shell-integration",
+        );
+        assert!(pixels.iter().any(|&px| px != 0));
     }
 
 }

@@ -2,7 +2,7 @@
 CARGO ?= cargo
 UNAME_S := $(shell uname -s)
 
-.PHONY: help build run run-cli release test check fmt lint clean install config macos-app macos-release install-macos
+.PHONY: help build run run-cli release test check fmt lint clean install config macos-app macos-release install-macos shell-integration
 
 help: ## Show available targets
 	@awk 'BEGIN { FS = ":.*## " } /^[a-zA-Z_-]+:.*## / { printf "  %-15s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -53,6 +53,9 @@ clean: ## Remove local build artifacts
 install: release ## Install the CLI executable in ~/.local/bin
 	@mkdir -p "$(HOME)/.local/bin"
 	install -m 755 ./target/release/rst "$(HOME)/.local/bin/rst"
+
+shell-integration: build ## Install OSC 133 hooks for bash, zsh and fish (one-time, idempotent)
+	./target/debug/rst --install-shell-integration
 
 config: ## Copy example configuration (do not overwrite)
 	@mkdir -p "$(HOME)/.config/rst"
