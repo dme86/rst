@@ -483,7 +483,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse = (position.x, position.y);
                 let tracking = self.terminal.screen.mouse_tracking;
-                if tracking.enabled() && !self.modifiers.shift_key() {
+                if tracking.enabled() && !self.modifiers.shift_key() && !self.selecting {
                     let at = self.cell_at_mouse();
                     let report = self.mouse_reporter.motion(
                         at,
@@ -512,19 +512,31 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput { button, state, .. } => {
                 let tracking = self.terminal.screen.mouse_tracking;
                 let at = self.cell_at_mouse();
+                // Once Shift begins a local selection inside a TUI, finish
+                // that gesture locally even if Shift is released before the
+                // mouse button. Otherwise a stray mouse-release escapes to
+                // the child application with no matching button press.
+                let finishing_local = self.selecting
+                    && button == MouseButton::Left
+                    && state == ElementState::Released;
+                let report_mods = if finishing_local {
+                    self.modifiers | ModifiersState::SHIFT
+                } else {
+                    self.modifiers
+                };
                 let report = self.mouse_reporter.button(
                     button,
                     state,
                     at,
                     tracking,
                     self.terminal.screen.mouse_sgr,
-                    self.modifiers,
+                    report_mods,
                 );
                 if !report.is_empty() {
                     self.pty.write(&report);
                 }
 
-                if tracking.enabled() && !self.modifiers.shift_key() {
+                if tracking.enabled() && !self.modifiers.shift_key() && !finishing_local {
                     // In reporting mode the child owns the click, not rst's
                     // clipboard selection. A Shift-forced selection can
                     // still be finished after the modifier is released.
