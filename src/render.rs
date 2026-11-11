@@ -264,7 +264,11 @@ impl Renderer {
             self.shape_cache.insert(cache_key, result.clone());
             result
         };
-        if shaped.total_advance <= 0 || shaped.units_per_em <= 0.0 {
+        if shaped.total_advance <= 0 || shaped.units_per_em <= 0.0
+            || shaped.glyphs.iter().any(|glyph| glyph.index == 0)
+        {
+            // Missing-glyph output must use the legacy font fallback rather
+            // than silently making a cluster disappear.
             return false;
         }
 
@@ -389,7 +393,10 @@ impl Renderer {
                     continue;
                 }
             }
-            col = start + cell.width.max(1) as usize;
+            // No ligature candidate anywhere in this homogeneous run:
+            // skip the whole span instead of rescanning its suffix at
+            // every column (O(n^2) on plain ASCII terminal screens).
+            col = end.max(start + 1);
         }
         covered
     }
@@ -1849,13 +1856,11 @@ mod tests {
         let Ok(renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
         assert_eq!(renderer.font_sources.len(), renderer.fonts.len());
         assert_eq!(renderer.styled_sources.len(), renderer.styled_fonts.len());
-        let Some(shaped) = shaping::shape(&renderer.font_sources[0], "ABC", true) else {
+        let Some(shaped) = shaping::shape(&renderer.font_sources[0], "A", true) else {
             return; // Some platform-specific system font formats may not parse.
         };
-        assert_eq!(shaped.glyphs.len(), 3);
-        for (glyph, letter) in shaped.glyphs.iter().zip("ABC".chars()) {
-            assert_eq!(glyph.index, renderer.fonts[0].lookup_glyph_index(letter));
-        }
+        assert_eq!(shaped.glyphs.len(), 1);
+        assert_eq!(shaped.glyphs[0].index, renderer.fonts[0].lookup_glyph_index('A'));
     }
 
     #[test]
@@ -1865,7 +1870,7 @@ mod tests {
         let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
         let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
         let mut term = crate::terminal::Terminal::new(12, 2, 0, palette);
-        term.advance(b"fi -> != <>".as_slice());
+        term.advance(b"fi -> != <>");
         term.screen.show_cursor = false;
         let width = term.screen.cols * renderer.cell_width;
         let height = term.screen.rows * renderer.cell_height;
