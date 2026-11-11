@@ -11,6 +11,8 @@ padding = 6
 [font]
 family = "0xProto Nerd Font"
 size = 16.5
+# HarfBuzz-compatible ligatures and contextual shaping for supported fonts.
+ligatures = true
 fallback = [
   "0xProto Nerd Font Mono",
   "JetBrainsMono Nerd Font",

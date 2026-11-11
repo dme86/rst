@@ -185,11 +185,30 @@ vendor or translate upstream C source.
 - st uses XIM under X11; rst deliberately targets native AppKit input
   services and Wayland text-input-v3 via winit instead.
 
+## OpenType shaping and combining graphemes (implemented)
+
+- Rustybuzz shapes GSUB/GPOS runs against the same font bytes/collection
+  index that fontdue uses for rasterizing the resulting glyph IDs.
+- Mixed colors, fonts, styled glyphs, cursor and selection split shaping
+  runs; the terminal grid and cell advances remain authoritative.
+- Programming ligatures are controlled by `[font].ligatures` (true by
+  default). Fallback faces and caches survive initial font discovery;
+  font-size changes clear all shaped-run and indexed-bitmap caches.
+- Terminal cells store up to eight extra Unicode scalars in a fixed-size
+  grapheme trail, preserving combining marks and ZWJ sequences in
+  scrollback, copying and preedit composition.
+- IME preedit renders shaped clusters with glyph/candidate selection
+  instead of only rasterizing the first Unicode scalar.
+- Pure Rust dependency; no native HarfBuzz needed on macOS or Wayland.
+- Remaining scope: full Unicode bidi paragraph reordering, large-grapheme
+  spillover beyond the bounded trail, and colored emoji rasterization.
+- Tests in src/shaping.rs, src/grapheme_tests.rs and src/render.rs.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
-- Full Unicode grapheme shaping, zero-width joining and ligatures.
+- Full Unicode bidi reordering and color emoji rasterization.
 - Modern negotiated keyboard protocols (CSI-u/kitty) and advanced mouse extensions outside upstream st.
 - Native Wayland clipboard without compositor data-control extensions.
-- Advanced script shaping/ligatures, hyperlinks, synchronized output, and clipboard read prompts.
+- Full bidi layout, unsupported color glyph layers, hyperlinks, synchronized output, and clipboard read prompts.
 - Automated comparison tests against a pinned upstream st revision.

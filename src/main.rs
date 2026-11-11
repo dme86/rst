@@ -8,6 +8,7 @@ mod osc;
 mod pty;
 mod render;
 mod selection;
+mod shaping;
 mod terminal;
 
 use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};

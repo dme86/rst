@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::{
     config::FontConfig,
     ime::{self, Preedit},
+    shaping::{self, FontBytes, ShapedText},
     terminal::{Cell, CursorShape, Screen, TextStyle},
     selection::Selection,
 };
@@ -21,12 +22,27 @@ struct Glyph {
 /// Pick a real bold/italic font face when the installed family provides it.
 /// If a family has no such face, the draw stage synthesizes the missing
 /// attribute rather than silently rendering a regular glyph.
+fn load_font_face(db: &Database, id: fontdb::ID) -> Option<(Font, FontBytes)> {
+    db.with_face_data(id, |data, index| {
+        let font = Font::from_bytes(
+            data.to_vec(),
+            FontSettings {
+                collection_index: index,
+                ..FontSettings::default()
+            },
+        ).ok()?;
+        Some((font, FontBytes { bytes: data.to_vec(), face_index: index }))
+    }).flatten()
+}
+
+/// Resolve real bold/italic faces *and their original bytes*. Rustybuzz and
+/// fontdue must use the same file/collection index for glyph IDs to agree.
 fn load_style_face(
     db: &Database,
     families: &[Family<'_>],
     bold: bool,
     italic: bool,
-) -> Option<Font> {
+) -> Option<(Font, FontBytes)> {
     let query = Query {
         families,
         weight: if bold { Weight::BOLD } else { Weight::NORMAL },
@@ -41,24 +57,19 @@ fn load_style_face(
     if italic && face.style == Style::Normal {
         return None;
     }
-    db.with_face_data(id, |data, index| {
-        Font::from_bytes(
-            data.to_vec(),
-            FontSettings {
-                collection_index: index,
-                ..FontSettings::default()
-            },
-        )
-        .ok()
-    })
-    .flatten()
+    load_font_face(db, id)
 }
 
 pub struct Renderer {
     fonts: Vec<Font>,
+    font_sources: Vec<FontBytes>,
     // For each regular fallback face: bold, italic, bold-italic variants.
     styled_fonts: Vec<[Option<Font>; 3]>,
+    styled_sources: Vec<[Option<FontBytes>; 3]>,
     glyphs: HashMap<(usize, u8, char), Glyph>,
+    indexed_glyphs: HashMap<(usize, u8, u16), Glyph>,
+    shape_cache: HashMap<(usize, u8, bool, String), ShapedText>,
+    ligatures: bool,
     // Only used when RST_DEBUG_FONTS=1 to avoid repeatedly reporting a codepoint.
     missing_glyphs: HashSet<char>,
     debug_fonts: bool,
@@ -76,7 +87,9 @@ impl Renderer {
         let mut db = Database::new();
         db.load_system_fonts();
         let mut fonts = Vec::new();
+        let mut font_sources = Vec::new();
         let mut styled_fonts = Vec::new();
+        let mut styled_sources = Vec::new();
         let mut loaded = Vec::new();
         let mut seen = HashSet::new();
         let debug_fonts = std::env::var_os("RST_DEBUG_FONTS").is_some();
@@ -89,26 +102,21 @@ impl Renderer {
                 families: &[Family::Name(family)],
                 ..Query::default()
             };
-            if let Some(font) = db.query(&query).and_then(|id| {
-                db.with_face_data(id, |data, index| {
-                    Font::from_bytes(
-                        data.to_vec(),
-                        FontSettings {
-                            collection_index: index,
-                            ..FontSettings::default()
-                        },
-                    )
-                    .ok()
-                })
-                .flatten()
-            }) {
+            if let Some((font, source)) = db.query(&query)
+                .and_then(|id| load_font_face(&db, id))
+            {
                 let family_query = [Family::Name(family)];
-                styled_fonts.push([
+                let variants = [
                     load_style_face(&db, &family_query, true, false),
                     load_style_face(&db, &family_query, false, true),
                     load_style_face(&db, &family_query, true, true),
-                ]);
+                ];
+                styled_sources.push(std::array::from_fn(|i| {
+                    variants[i].as_ref().map(|(_, bytes)| bytes.clone())
+                }));
+                styled_fonts.push(variants.map(|value| value.map(|(font, _)| font)));
                 fonts.push(font);
+                font_sources.push(source);
                 loaded.push(family.to_string());
             } else if debug_fonts {
                 eprintln!("rst: font family not available: {family}");
@@ -121,26 +129,21 @@ impl Renderer {
                 families: &[Family::Monospace],
                 ..Query::default()
             };
-            if let Some(font) = db.query(&query).and_then(|id| {
-                db.with_face_data(id, |data, index| {
-                    Font::from_bytes(
-                        data.to_vec(),
-                        FontSettings {
-                            collection_index: index,
-                            ..FontSettings::default()
-                        },
-                    )
-                    .ok()
-                })
-                .flatten()
-            }) {
+            if let Some((font, source)) = db.query(&query)
+                .and_then(|id| load_font_face(&db, id))
+            {
                 let family_query = [Family::Monospace];
-                styled_fonts.push([
+                let variants = [
                     load_style_face(&db, &family_query, true, false),
                     load_style_face(&db, &family_query, false, true),
                     load_style_face(&db, &family_query, true, true),
-                ]);
+                ];
+                styled_sources.push(std::array::from_fn(|i| {
+                    variants[i].as_ref().map(|(_, bytes)| bytes.clone())
+                }));
+                styled_fonts.push(variants.map(|value| value.map(|(font, _)| font)));
                 fonts.push(font);
+                font_sources.push(source);
                 loaded.push("system monospace".to_string());
             }
         }
@@ -158,8 +161,13 @@ impl Renderer {
 
         Ok(Self {
             fonts,
+            font_sources,
             styled_fonts,
+            styled_sources,
             glyphs: HashMap::new(),
+            indexed_glyphs: HashMap::new(),
+            shape_cache: HashMap::new(),
+            ligatures: config.ligatures,
             missing_glyphs: HashSet::new(),
             debug_fonts,
             font_size,
@@ -190,6 +198,218 @@ impl Renderer {
         // Previously rasterized pixels belong to a different font size.
         // Keep parsed font faces and fallback order; only discard bitmaps.
         self.glyphs.clear();
+        self.indexed_glyphs.clear();
+        self.shape_cache.clear();
+    }
+
+    /// Use the same fallback/variant decision for shaping as glyph rasterization.
+    fn face_choice(&self, ch: char, style: TextStyle) -> (usize, u8) {
+        let index = self.fonts.iter().position(|font| font.has_glyph(ch)).unwrap_or(0);
+        let bold = style.contains(TextStyle::BOLD);
+        let italic = style.contains(TextStyle::ITALIC);
+        let preferred: &[u8] = match (bold, italic) {
+            (true, true) => &[3, 2, 1],
+            (true, false) => &[1],
+            (false, true) => &[2],
+            _ => &[],
+        };
+        let variant = preferred.iter().copied().find(|&candidate| {
+            self.styled_fonts[index][candidate as usize - 1]
+                .as_ref().is_some_and(|font| font.has_glyph(ch))
+        }).unwrap_or(0);
+        (index, variant)
+    }
+
+    fn font_source(&self, face: (usize, u8)) -> Option<&FontBytes> {
+        if face.1 == 0 {
+            self.font_sources.get(face.0)
+        } else {
+            self.styled_sources
+                .get(face.0)?
+                .get(face.1 as usize - 1)?
+                .as_ref()
+        }
+    }
+
+    /// Rasterize Rustybuzz's substituted glyph IDs with fontdue, using
+    /// identical font bytes/face index. Fit advances to the terminal grid:
+    /// shaping may substitute and join glyphs but cannot move the cursor or
+    /// change the reserved width of the caller's cell span.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_shaped_text(
+        &mut self,
+        pixels: &mut [u32],
+        stride: usize,
+        height: usize,
+        x: usize,
+        y: usize,
+        slot_width: usize,
+        text: &str,
+        fg: u32,
+        style: TextStyle,
+        face: (usize, u8),
+    ) -> bool {
+        if slot_width == 0 || text.is_empty() {
+            return false;
+        }
+        let cache_key = (face.0, face.1, self.ligatures, text.to_owned());
+        let shaped = if let Some(hit) = self.shape_cache.get(&cache_key) {
+            hit.clone()
+        } else {
+            let Some(source) = self.font_source(face) else { return false };
+            let Some(result) = shaping::shape(source, text, self.ligatures) else {
+                return false;
+            };
+            if self.shape_cache.len() >= 1024 {
+                self.shape_cache.clear();
+            }
+            self.shape_cache.insert(cache_key, result.clone());
+            result
+        };
+        if shaped.total_advance == 0 || shaped.units_per_em <= 0.0
+            || shaped.glyphs.iter().any(|glyph| glyph.index == 0)
+        {
+            // Missing-glyph output must use the legacy font fallback rather
+            // than silently making a cluster disappear.
+            return false;
+        }
+
+        let em_scale = self.font_size / shaped.units_per_em;
+        let natural = shaped.total_advance.unsigned_abs() as f32 * em_scale;
+        let horizontal = slot_width as f32 / natural;
+        // Extremely non-monospace fallback faces should not stretch a
+        // single glyph beyond recognition; use legacy rendering instead.
+        if !(0.4..=3.0).contains(&horizontal) {
+            return false;
+        }
+        let baseline = self.ascent
+            + (self.cell_height as i32 - self.font_size.ceil() as i32).max(0) / 2;
+        // Borrow the font array and raster cache as disjoint fields.
+        let face_font = if face.1 == 0 {
+            &self.fonts[face.0]
+        } else {
+            self.styled_fonts[face.0][face.1 as usize - 1]
+                .as_ref().expect("variant selected from available face")
+        };
+        if shaped.glyphs.iter().any(|glyph| glyph.index >= face_font.glyph_count()) {
+            return false;
+        }
+        // Some RTL shapers express advances as negative design units.
+        // Start those runs at the right edge while preserving grid width.
+        let mut pen: i64 = if shaped.total_advance < 0 {
+            -shaped.total_advance
+        } else {
+            0
+        };
+        for item in &shaped.glyphs {
+            let gid = item.index;
+            let size = self.font_size;
+            let bitmap = self.indexed_glyphs.entry((face.0, face.1, gid))
+                .or_insert_with(|| {
+                    let (metrics, bitmap) = face_font.rasterize_indexed(gid, size);
+                    Glyph { metrics, bitmap }
+                });
+            let metrics = &bitmap.metrics;
+            let offset_x = ((pen + item.x_offset as i64) as f32 * em_scale * horizontal)
+                .round() as i64;
+            let px = x as i64 + offset_x + metrics.xmin as i64;
+            let py = y as i64 + baseline as i64
+                - metrics.ymin as i64 - metrics.height as i64
+                - (item.y_offset as f32 * em_scale).round() as i64;
+            for dy in 0..metrics.height {
+                let ty = py + dy as i64;
+                if ty < y as i64 || ty >= y.saturating_add(self.cell_height) as i64
+                    || ty < 0 || ty >= height as i64 { continue; }
+                for dx in 0..metrics.width {
+                    let tx = px + dx as i64;
+                    if tx < x as i64 || tx >= x.saturating_add(slot_width) as i64
+                        || tx < 0 || tx >= stride as i64 { continue; }
+                    let alpha = bitmap.bitmap[dy * metrics.width + dx];
+                    if alpha == 0 { continue; }
+                    let index = ty as usize * stride + tx as usize;
+                    pixels[index] = blend(fg, pixels[index], alpha);
+                    if style.contains(TextStyle::BOLD)
+                        && face.1 != 1 && face.1 != 3
+                        && tx + 1 < stride as i64
+                        && tx + 1 < x.saturating_add(slot_width) as i64
+                    {
+                        pixels[index + 1] = blend(fg, pixels[index + 1], alpha);
+                    }
+                }
+            }
+            pen += item.x_advance as i64;
+        }
+        true
+    }
+
+    /// Shape only homogeneous runs. Never cross an SGR/selection/cursor,
+    /// fallback-font or Powerline boundary: doing so would move glyph ink
+    /// across a TUI's colored cells or break column-based selection.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_shaped_row(
+        &mut self,
+        pixels: &mut [u32],
+        stride: usize,
+        height: usize,
+        screen: &Screen,
+        row: usize,
+        selection: Option<Selection>,
+        show_cursor: bool,
+    ) -> Vec<bool> {
+        let cells = screen.display_row(row);
+        let mut covered = vec![false; screen.cols];
+        let mut col = 0usize;
+        while col < screen.cols {
+            let start = col;
+            let cell = cells[start];
+            if cell.width == 0 || cell.ch.is_control()
+                || is_nerd_icon(cell.ch) || matches!(cell.ch as u32, 0xe0b0..=0xe0b3)
+                || !cell.style.visible(screen.text_blink_on)
+            {
+                col += 1;
+                continue;
+            }
+            let face = self.face_choice(cell.ch, cell.style);
+            let colors = cell_colors_with_cursor(screen, row, start, cell, selection, show_cursor);
+            let mut text = String::new();
+            let mut end = start;
+            while end < screen.cols && end - start < 96 {
+                let c = cells[end];
+                if c.width == 0 {
+                    end += 1;
+                    continue;
+                }
+                if c.ch.is_control() || is_nerd_icon(c.ch)
+                    || matches!(c.ch as u32, 0xe0b0..=0xe0b3)
+                    || c.style != cell.style
+                    || !c.style.visible(screen.text_blink_on)
+                    || self.face_choice(c.ch, c.style) != face
+                    || cell_colors_with_cursor(screen, row, end, c, selection, show_cursor) != colors
+                {
+                    break;
+                }
+                text.push_str(&c.text());
+                end += c.width as usize;
+            }
+            if end > start && shaping::needs_shaping(&text, self.ligatures) {
+                let y = self.padding.saturating_add(row.saturating_mul(self.cell_height));
+                let ink = effective_ink_color(cell.style, colors.0, colors.1);
+                if self.draw_shaped_text(
+                    pixels, stride, height,
+                    self.padding.saturating_add(start.saturating_mul(self.cell_width)),
+                    y, (end - start) * self.cell_width, &text, ink, cell.style, face,
+                ) {
+                    covered[start..end].fill(true);
+                    col = end;
+                    continue;
+                }
+            }
+            // No ligature candidate anywhere in this homogeneous run:
+            // skip the whole span instead of rescanning its suffix at
+            // every column (O(n^2) on plain ASCII terminal screens).
+            col = end.max(start + 1);
+        }
+        covered
     }
 
     /// Returns bitmap plus whether bold / italic should be synthesized.
@@ -292,6 +512,9 @@ impl Renderer {
             if y >= height {
                 break;
             }
+            let shaped = self.draw_shaped_row(
+                pixels, width, height, screen, row, selection, preedit.is_none(),
+            );
             for (col, &cell) in screen.display_row(row).iter().enumerate() {
                 if cell.width == 0 {
                     continue;
@@ -307,7 +530,7 @@ impl Renderer {
                     screen, row, col, cell, selection, preedit.is_none(),
                 );
                 let ink = effective_ink_color(cell.style, fg, bg);
-                if cell.ch != ' ' {
+                if cell.ch != ' ' && !shaped[col] {
                     let spill = icon_spill(screen, row, col, cell, selection, self.cell_width);
                     self.draw_glyph(pixels, width, height, x, y, cell, ink, spill);
                 }
@@ -332,8 +555,9 @@ impl Renderer {
         }
     }
 
-    /// Render composition above the already drawn terminal grid. No cell
-    /// or scrollback mutation occurs until winit emits Ime::Commit.
+    /// Render the composition as temporary grouped glyph runs. An Arabic or
+    /// Indic word must be shaped as a *run*, not as isolated characters.
+    /// Split only at a visual row, style/selection, or fallback-font boundary.
     fn draw_preedit(
         &mut self,
         pixels: &mut [u32],
@@ -351,48 +575,81 @@ impl Renderer {
         let padding = self.padding;
         let ascent = self.ascent;
         let font_size = self.font_size;
-        for glyph in layout.glyphs {
+        let style = TextStyle::UNDERLINE;
+
+        // Backdrops are individual grid rectangles even when the font
+        // substitutes multiple characters with one ligature glyph.
+        for glyph in &layout.glyphs {
             let x = padding.saturating_add(glyph.col.saturating_mul(cell_w));
             let y = padding.saturating_add(glyph.row.saturating_mul(cell_h));
-            let cell_width = glyph.cells * cell_w;
             let bg = if glyph.selected { screen.palette.cursor }
                 else { screen.palette.selection };
-            let fg = if glyph.selected { screen.palette.background }
-                else { screen.palette.foreground };
-            rect(pixels, width, height, x, y, cell_width, cell_h, bg);
+            rect(pixels, width, height, x, y, glyph.cells * cell_w, cell_h, bg);
+        }
 
-            // Copy the existing Cell layout rather than rebuilding all of
-            // its color-provenance fields. Only the temporary overlay is
-            // changed; the actual terminal buffer stays untouched.
-            if let Some(&original) = screen.display_row(glyph.row).get(glyph.col) {
-                let mut cell = original;
-                // NFC composes common dead-key sequences (e + combining
-                // acute => é), so the preview does not silently drop the
-                // accent while the OS is still composing the input.
-                let composed: String = glyph.text.nfc().collect();
-                let mut chars = composed.chars();
-                cell.ch = chars.next().unwrap_or(' ');
-                cell.width = glyph.cells as u8;
-                cell.style = TextStyle::UNDERLINE;
-                if cell.ch != ' ' && !cell.ch.is_control() {
-                    self.draw_glyph(pixels, width, height, x, y, cell, fg, (0, 0));
-                }
-                // Remaining combining marks have zero advance: overlay
-                // their glyph where supported by the selected font. ZWJ
-                // scripts still require a shaping engine in the future.
-                for mark in chars {
-                    if UnicodeWidthChar::width(mark) == Some(0)
-                        && !matches!(mark, '\u{200d}' | '\u{fe0f}')
-                    {
-                        cell.ch = mark;
-                        self.draw_glyph(pixels, width, height, x, y, cell, fg, (0, 0));
+        let glyphs = &layout.glyphs;
+        let mut i = 0;
+        while i < glyphs.len() {
+            let start = i;
+            let selected = glyphs[i].selected;
+            let row = glyphs[i].row;
+            let first = glyphs[i].text.chars().next().unwrap_or(' ');
+            let face = self.face_choice(first, style);
+            let mut text = String::new();
+            let mut next_col = glyphs[i].col;
+            while i < glyphs.len()
+                && glyphs[i].row == row
+                && glyphs[i].selected == selected
+                && glyphs[i].col == next_col
+                && self.face_choice(glyphs[i].text.chars().next().unwrap_or(' '), style) == face
+            {
+                text.push_str(&glyphs[i].text);
+                next_col += glyphs[i].cells;
+                i += 1;
+            }
+            let x = padding.saturating_add(glyphs[start].col.saturating_mul(cell_w));
+            let y = padding.saturating_add(row.saturating_mul(cell_h));
+            let slot_width = (next_col - glyphs[start].col) * cell_w;
+            let fg = if selected { screen.palette.background }
+                else { screen.palette.foreground };
+            let shaped = self.draw_shaped_text(
+                pixels, width, height, x, y,
+                slot_width, &text, fg, style, face,
+            );
+            if !shaped {
+                // Malformed/unavailable OpenType data: retain the previous
+                // fontdue/NFC preview path, not a blank composition.
+                for glyph in &glyphs[start..i] {
+                    let Some(&original) = screen.display_row(glyph.row).get(glyph.col) else {
+                        continue;
+                    };
+                    let mut cell = original;
+                    let composed: String = glyph.text.nfc().collect();
+                    let mut chars = composed.chars();
+                    cell.ch = chars.next().unwrap_or(' ');
+                    cell.width = glyph.cells as u8;
+                    cell.style = style;
+                    let gx = padding.saturating_add(glyph.col.saturating_mul(cell_w));
+                    let gy = padding.saturating_add(glyph.row.saturating_mul(cell_h));
+                    if cell.ch != ' ' && !cell.ch.is_control() {
+                        self.draw_glyph(pixels, width, height, gx, gy, cell, fg, (0, 0));
+                    }
+                    for mark in chars {
+                        if UnicodeWidthChar::width(mark) == Some(0)
+                            && !matches!(mark, '\u{200d}' | '\u{fe0f}')
+                        {
+                            cell.ch = mark;
+                            self.draw_glyph(pixels, width, height, gx, gy, cell, fg, (0, 0));
+                        }
                     }
                 }
-                // A thin underline indicates ongoing, uncommitted input.
+            }
+            for glyph in &glyphs[start..i] {
+                let gx = padding.saturating_add(glyph.col.saturating_mul(cell_w));
+                let gy = padding.saturating_add(glyph.row.saturating_mul(cell_h));
                 paint_decorations(
-                    pixels, width, height, x, y,
-                    cell_width, cell_h, ascent, font_size,
-                    TextStyle::UNDERLINE, fg,
+                    pixels, width, height, gx, gy,
+                    glyph.cells * cell_w, cell_h, ascent, font_size, style, fg,
                 );
             }
         }
@@ -1600,6 +1857,91 @@ mod tests {
         assert_eq!(composing[y * width + x], terminal.screen.palette.background);
         assert_eq!(terminal.screen.x, 3);
         assert_eq!(terminal.screen.y, 2);
+    }
+
+
+    #[test]
+    fn shaped_glyph_ids_match_same_fontdue_face_and_collection_index() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        assert_eq!(renderer.font_sources.len(), renderer.fonts.len());
+        assert_eq!(renderer.styled_sources.len(), renderer.styled_fonts.len());
+        let Some(shaped) = shaping::shape(&renderer.font_sources[0], "A", true) else {
+            return; // Some platform-specific system font formats may not parse.
+        };
+        assert_eq!(shaped.glyphs.len(), 1);
+        assert_eq!(shaped.glyphs[0].index, renderer.fonts[0].lookup_glyph_index('A'));
+    }
+
+    #[test]
+    fn ligature_candidate_shaping_respects_exact_grid_width_and_color() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(12, 2, 0, palette);
+        term.advance(b"fi -> != <>");
+        term.screen.show_cursor = false;
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &term.screen, None, None);
+        assert_eq!(term.screen.grid[0][0].ch, 'f');
+        assert_eq!(term.screen.grid[0][1].ch, 'i');
+        assert_eq!(term.screen.x, 11);
+        assert!(pixels.iter().any(|&pixel| pixel != term.screen.palette.background));
+        // Shaping never writes back into the terminal grid.
+        assert_eq!(term.screen.grid[0][3].ch, '-');
+        assert_eq!(term.screen.grid[0][4].ch, '>');
+    }
+
+    #[test]
+    fn ligatures_can_be_disabled_without_disabling_non_ascii_shaping() {
+        let mut config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        config.font.ligatures = false;
+        let Ok(renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        assert!(!renderer.ligatures);
+        assert!(!shaping::needs_shaping("fi => ffi", renderer.ligatures));
+        assert!(shaping::needs_shaping("مرحبا", renderer.ligatures));
+    }
+
+    #[test]
+    fn shaping_cache_reuses_run_and_clears_on_font_zoom() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let Some(shaped) = shaping::shape(&renderer.font_sources[0], "fi", true) else {
+            return;
+        };
+        renderer.shape_cache.insert((0, 0, true, "fi".to_owned()), shaped);
+        assert_eq!(renderer.shape_cache.len(), 1);
+        renderer.set_font_size(config.font.size + 1.0, 1.0);
+        assert!(renderer.shape_cache.is_empty());
+        assert!(renderer.indexed_glyphs.is_empty());
+    }
+
+    #[test]
+    fn arabic_preedit_is_shaped_without_mutating_terminal_cells() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(16, 2, 0, palette);
+        term.advance(b"hello");
+        let preedit = crate::ime::Preedit {
+            text: "مرحبا".to_owned(),
+            cursor: Some((10, 10)),
+        };
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &term.screen, None, Some(&preedit));
+        assert_eq!(term.screen.grid[0][0].ch, 'h');
+        assert_eq!(term.screen.grid[0][1].ch, 'e');
+        assert!(term.screen.history.is_empty());
+        assert!(pixels.iter().any(|&pixel| pixel == term.screen.palette.selection));
     }
 
 }
