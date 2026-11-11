@@ -17,6 +17,7 @@ mod shell_integration;
 mod shaping;
 mod terminal;
 mod url_picker;
+mod tabs;
 
 use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};
 
@@ -26,7 +27,7 @@ use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{UserAttentionType, Window, WindowId},
 };
@@ -48,11 +49,26 @@ use crate::{
     url_picker::UrlPicker,
 };
 
+/// A hidden session keeps its own PTY and complete VT state. Only the
+/// foreground session is rendered, and only it runs cursor/text blink clocks.
+struct StoredTab {
+    id: u64,
+    terminal: Terminal,
+    pty: PtySession,
+    unread: bool,
+}
+
 struct App {
     config: Config,
     original_font_size: f32,
     terminal: Terminal,
     pty: PtySession,
+    active_tab_id: u64,
+    next_tab_id: u64,
+    tab_order: Vec<u64>,
+    inactive_tabs: Vec<StoredTab>,
+    proxy: EventLoopProxy<UserEvent>,
+    shell_label: String,
     context: Context<OwnedDisplayHandle>,
     window: Option<Arc<Window>>,
     surface: Option<Surface<OwnedDisplayHandle, Arc<Window>>>,
@@ -85,16 +101,22 @@ impl App {
         let cols = ((size.width as usize).saturating_sub(2 * renderer.padding)
             / renderer.cell_width)
             .max(1);
-        let rows = ((size.height as usize).saturating_sub(2 * renderer.padding)
-            / renderer.cell_height)
-            .max(1);
+        let bar_h = tabs::bar_height(renderer.cell_height, self.config.tabs.enabled);
+        let rows = ((size.height as usize).saturating_sub(
+            2 * renderer.padding + bar_h
+        ) / renderer.cell_height).max(1);
         if (cols, rows) != (self.terminal.screen.cols, self.terminal.screen.rows) {
             self.terminal.screen.resize(cols, rows);
             self.selection = None;
             self.selecting = false;
             self.clicks.reset();
-            self.pty
-                .resize(cols, rows, renderer.cell_width, renderer.cell_height);
+            self.pty.resize(cols, rows, renderer.cell_width, renderer.cell_height);
+            // Hidden shells still need SIGWINCH: their TUIs must have the
+            // correct grid as soon as we switch back to them.
+            for tab in &mut self.inactive_tabs {
+                tab.terminal.screen.resize(cols, rows);
+                tab.pty.resize(cols, rows, renderer.cell_width, renderer.cell_height);
+            }
         }
         window.request_redraw();
         self.update_ime_cursor_area();
@@ -114,7 +136,11 @@ impl App {
              screen.y.min(screen.rows.saturating_sub(1)))
         };
         let x = renderer.padding.saturating_add(col.saturating_mul(renderer.cell_width));
-        let y = renderer.padding.saturating_add(row.saturating_mul(renderer.cell_height));
+        let top_bar = if self.config.tabs.enabled && self.config.tabs.position == "top" {
+            tabs::bar_height(renderer.cell_height, true)
+        } else { 0 };
+        let y = renderer.padding.saturating_add(top_bar)
+            .saturating_add(row.saturating_mul(renderer.cell_height));
         window.set_ime_cursor_area(
             PhysicalPosition::new(x.min(i32::MAX as usize) as i32,
                                   y.min(i32::MAX as usize) as i32),
@@ -235,7 +261,11 @@ impl App {
         };
         let x = (self.mouse.0.max(0.0) as usize).saturating_sub(renderer.padding)
             / renderer.cell_width;
-        let y = (self.mouse.1.max(0.0) as usize).saturating_sub(renderer.padding)
+        let top_bar = if self.config.tabs.enabled && self.config.tabs.position == "top" {
+            tabs::bar_height(renderer.cell_height, true)
+        } else { 0 };
+        let y = (self.mouse.1.max(0.0) as usize)
+            .saturating_sub(renderer.padding.saturating_add(top_bar))
             / renderer.cell_height;
         (
             x.min(self.terminal.screen.cols - 1),
