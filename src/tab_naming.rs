@@ -186,5 +186,6 @@ mod tests {
         assert_eq!(directory_label("/Users/dan", Some("/Users/dan"), 11), "~");
         assert_eq!(directory_label("/", Some("/Users/dan"), 11), "/");
         assert_eq!(label_columns(16, true), 9);
+        assert_eq!(label_columns(20, true), 13);
     }
 }
