@@ -97,3 +97,36 @@ fn capture_can_be_limited_independently_of_terminal_history() {
     assert_eq!(t.screen.command_capture.latest_output(), Err(CopyError::TooLarge));
     assert_eq!(t.screen.history.len(), 0);
 }
+
+
+#[test]
+fn url_palette_uses_osc133_output_but_not_prompt_or_scrollback() {
+    let mut t = term(15, 2, 1);
+    t.screen.command_capture = CommandCapture::with_url_history(1024 * 1024, 2);
+    t.advance(b"\x1b]133;A\x07https://prompt.example ");
+    t.advance(b"\x1b]133;C\x07https://first.example\n\x1b]133;D\x07");
+    t.advance(b"\x1b]133;C\x07https://second.example https://first.example\n\x1b]133;D\x07");
+    for _ in 0..20 {
+        t.advance(b"other text\n");
+    }
+    assert!(t.screen.history.len() <= 1);
+    assert_eq!(t.screen.command_capture.recent_urls(), vec![
+        "https://first.example",
+        "https://second.example",
+    ]);
+}
+
+#[test]
+fn url_palette_includes_running_commands_and_expires_old_entries() {
+    let mut t = term(32, 3, 3);
+    t.screen.command_capture = CommandCapture::with_url_history(1024 * 1024, 1);
+    t.advance(b"\x1b]133;C\x07https://old.example\x1b]133;D\x07");
+    t.advance(b"\x1b]133;C\x07https://running.example");
+    assert_eq!(t.screen.command_capture.recent_urls(), vec![
+        "https://running.example", "https://old.example",
+    ]);
+    t.advance(b"\x1b]133;D\x07");
+    assert_eq!(t.screen.command_capture.recent_urls(), vec![
+        "https://running.example",
+    ]);
+}
