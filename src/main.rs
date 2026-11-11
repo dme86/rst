@@ -11,6 +11,7 @@ mod mouse;
 mod macos_icon;
 mod osc;
 mod pty;
+mod process_name;
 mod render;
 mod selection;
 mod shell_integration;
@@ -84,6 +85,7 @@ struct App {
     selecting: bool,
     next_cursor_blink: Instant,
     next_text_blink: Instant,
+    next_process_probe: Instant,
     focus: FocusTracker,
     bell_limiter: BellLimiter,
     bell_flash_until: Option<Instant>,
@@ -95,6 +97,39 @@ struct App {
 }
 
 impl App {
+    /// A PTY with a running command or an alternate-screen TUI can have a
+    /// foreground job other than its interactive shell. Idle tabs never
+    /// cause process queries or extra wakeups.
+    fn tab_may_have_foreground_job(screen: &terminal::Screen) -> bool {
+        screen.command_capture.running() || screen.in_alternate_screen()
+    }
+
+    /// Called at most once per probe interval from about_to_wait, never
+    /// from rendering or the PTY reader threads. Only name changes repaint.
+    fn refresh_foreground_process_names(&mut self) -> bool {
+        let mut changed = false;
+        if Self::tab_may_have_foreground_job(&self.terminal.screen) {
+            changed |= self.pty.refresh_foreground_name();
+        } else {
+            changed |= self.pty.clear_foreground_name();
+        }
+        for tab in &mut self.inactive_tabs {
+            if Self::tab_may_have_foreground_job(&tab.terminal.screen) {
+                changed |= tab.pty.refresh_foreground_name();
+            } else {
+                changed |= tab.pty.clear_foreground_name();
+            }
+        }
+        changed
+    }
+
+    fn has_foreground_job(&self) -> bool {
+        Self::tab_may_have_foreground_job(&self.terminal.screen)
+            || self.inactive_tabs.iter().any(|tab| {
+                Self::tab_may_have_foreground_job(&tab.terminal.screen)
+            })
+    }
+
     fn active_tab_index(&self) -> usize {
         self.tab_order.iter().position(|id| *id == self.active_tab_id).unwrap_or(0)
     }
@@ -104,14 +139,15 @@ impl App {
             tabs::TAB_COLUMNS, self.config.tabs.close_buttons,
         );
         self.tab_order.iter().map(|id| {
-            let (screen, unread) = if *id == self.active_tab_id {
-                (&self.terminal.screen, false)
+            let (screen, process_name, unread) = if *id == self.active_tab_id {
+                (&self.terminal.screen, self.pty.foreground_name(), false)
             } else {
                 let tab = self.inactive_tabs.iter().find(|tab| tab.id == *id)
                     .expect("all inactive IDs remain stored");
-                (&tab.terminal.screen, tab.unread)
+                (&tab.terminal.screen, tab.pty.foreground_name(), tab.unread)
             };
-            let title = tab_naming::label(
+            let title = tab_naming::label_with_process(
+                process_name,
                 screen.cwd.as_deref(),
                 screen.foreground_program.as_deref(),
                 &screen.title,
@@ -1029,6 +1065,24 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        // Query only the owned PTYs' foreground process groups, at a
+        // bounded frequency while a command/TUI is running. There is no
+        // process-tree scan, external 'ps', or per-frame process lookup.
+        if self.config.tabs.enabled && self.window.is_some() && self.has_foreground_job() {
+            if now >= self.next_process_probe {
+                if self.refresh_foreground_process_names() {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                self.next_process_probe = now + Duration::from_millis(500);
+            }
+            let next = self.next_process_probe;
+            next_deadline = Some(next_deadline.map_or(next, |old| old.min(next)));
+        } else {
+            // Start probing immediately when the next foreground job begins.
+            self.next_process_probe = now;
+        }
         // No busy redraw when neither blinking nor a bell flash is active.
         event_loop.set_control_flow(
             next_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
@@ -1534,6 +1588,7 @@ fn main() -> Result<()> {
         next_cursor_blink: Instant::now()
             + Duration::from_millis(config_blink_ms),
         next_text_blink: Instant::now() + Duration::from_millis(800),
+        next_process_probe: Instant::now(),
         focus: FocusTracker::default(),
         bell_limiter: BellLimiter::default(),
         bell_flash_until: None,
