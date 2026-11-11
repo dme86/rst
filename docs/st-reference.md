@@ -204,6 +204,31 @@ vendor or translate upstream C source.
   spillover beyond the bounded trail, and colored emoji rasterization.
 - Tests in src/shaping.rs, src/grapheme_tests.rs and src/render.rs.
 
+## OSC 133 command-output capture and built-in help
+
+- Parse OSC 133;A/B/C/D from fish/zsh/bash shell hooks via vte. C starts
+  output capture; D or next A ends it. Prompt and echoed command line are
+  never included in the copied buffer. Unknown markers are ignored.
+- Capture decoded Unicode after escape parsing, including DEC special
+  graphics. Preserve explicit output line breaks while honoring carriage
+  returns, backspaces, tabs and CSI K. Not a full duplicate terminal grid.
+- Retain the last completed output and any currently running output
+  independently from history, each limited to the configurable
+  [command_output].max_megabytes (1..128, default 32); overflow is
+  reported, never silently truncated.
+- Cmd+Shift+O / Ctrl+Shift+O copies to the existing native arboard
+  clipboard. It works with output emitted before the scrollback window.
+- Add a modal, scrollable help popup (F1, Cmd/Ctrl+Shift+H; Esc closes)
+  and a timed status toast to the existing softbuffer renderer, without
+  touching terminal contents or forwarding help keystrokes to the PTY.
+- Explicit `rst --install-shell-integration` safely appends idempotent
+  opt-in startup lines to bash/zsh/fish. Normal startup leaves rc files
+  unchanged; TERM_PROGRAM=rst gates all shell hooks.
+- Shell hooks are copied into the executable via Rust include_str!,
+  working with both native macOS app packaging and Linux CLI builds.
+- Tests: src/command_capture.rs, src/command_capture_tests.rs,
+  src/help.rs and src/shell_integration.rs.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
