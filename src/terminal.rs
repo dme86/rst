@@ -126,10 +126,6 @@ impl Cell {
         }
     }
 
-    fn ends_with_joiner(self) -> bool {
-        self.combining_len != 0
-            && self.combining[self.combining_len as usize - 1] == '\u{200d}'
-    }
 }
 
 #[derive(Clone)]
@@ -668,7 +664,7 @@ impl Screen {
                 candidate.push(ch);
                 UnicodeSegmentation::graphemes(candidate.as_str(), true).count() == 1
             };
-            if width == 0 || same_grapheme && cell.ends_with_joiner() {
+            if width == 0 || same_grapheme {
                 self.grid[y][x].append_combining(ch);
                 return;
             }
