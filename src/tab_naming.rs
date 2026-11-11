@@ -1,5 +1,5 @@
-//! Event-driven tab naming metadata (OSC 7 and OSC 133;E).
-//! No process polling, shell invocation or per-frame work is needed.
+//! Tab names from native foreground executables and OSC metadata.
+//! No shell invocation or per-frame process lookup is needed.
 
 const MAX_METADATA_BYTES: usize = 4096;
 const MAX_PROGRAM_BYTES: usize = 128;
