@@ -1,3 +1,4 @@
+mod attention;
 mod charset;
 mod config;
 mod keyboard;
@@ -18,12 +19,13 @@ use winit::{
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{Window, WindowId},
+    window::{UserAttentionType, Window, WindowId},
 };
 
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 use crate::{
+    attention::{BellLimiter, FocusTracker, VISUAL_BELL_DURATION},
     config::Config,
     keyboard::{encode_key, KeyboardModes},
     mouse::MouseReporter,
@@ -50,6 +52,9 @@ struct App {
     selecting: bool,
     next_cursor_blink: Instant,
     next_text_blink: Instant,
+    focus: FocusTracker,
+    bell_limiter: BellLimiter,
+    bell_flash_until: Option<Instant>,
 }
 
 impl App {
@@ -105,9 +110,39 @@ impl App {
             &self.terminal.screen,
             self.selection,
         );
+        if self.bell_flash_until.is_some_and(|until| Instant::now() < until) {
+            render::paint_bell_border(
+                &mut buffer,
+                size.width as usize,
+                size.height as usize,
+                self.terminal.screen.palette.cursor,
+            );
+        }
         window.pre_present_notify();
         if let Err(err) = buffer.present() {
             eprintln!("rst: present: {err}");
+        }
+    }
+
+    fn handle_bell(&mut self) {
+        if !self.config.bell.enabled || !self.bell_limiter.allow(Instant::now()) {
+            return;
+        }
+        if self.config.bell.audible {
+            attention::audible_bell();
+        }
+        if self.config.bell.visual {
+            self.bell_flash_until = Some(Instant::now() + VISUAL_BELL_DURATION);
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        // st marks an unfocused window as urgent. Winit maps this onto
+        // Dock attention on macOS and xdg-activation where Wayland supports it.
+        if !self.focus.is_focused() {
+            if let Some(window) = &self.window {
+                window.request_user_attention(Some(UserAttentionType::Informational));
+            }
         }
     }
 
@@ -397,7 +432,18 @@ impl ApplicationHandler<UserEvent> for App {
             self.terminal.screen.text_blink_on = true;
             self.next_text_blink = now + Duration::from_millis(800);
         }
-        // No busy redrawing when the screen has no blinking cells.
+        // Expire a visual bell even if the PTY produces no further output.
+        if let Some(until) = self.bell_flash_until {
+            if now >= until {
+                self.bell_flash_until = None;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            } else {
+                next_deadline = Some(next_deadline.map_or(until, |other| other.min(until)));
+            }
+        }
+        // No busy redraw when neither blinking nor a bell flash is active.
         event_loop.set_control_flow(
             next_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
         );
@@ -470,11 +516,19 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(event),
             WindowEvent::Focused(focused) => {
-                // DECSET 1004: notify the child about actual focus changes.
-                if self.terminal.screen.focus_reporting {
-                    self.pty.write(if focused { b"\x1b[I" } else { b"\x1b[O" });
+                // DECSET 1004: only real focus transitions reach the PTY.
+                // Remember focus even while reporting is disabled, so
+                // enabling 1004 mid-session does not invent an extra event.
+                if let Some(report) = self.focus.change(
+                    focused, self.terminal.screen.focus_reporting,
+                ) {
+                    self.pty.write(report);
                 }
-                if !focused {
+                if focused {
+                    if let Some(window) = &self.window {
+                        window.request_user_attention(None);
+                    }
+                } else {
                     // A mouse release may be lost when the window loses focus.
                     self.mouse_reporter.reset();
                     self.selecting = false;
@@ -629,6 +683,9 @@ impl ApplicationHandler<UserEvent> for App {
                 let previous_title = self.terminal.screen.title.clone();
                 let previous_cursor_style = self.terminal.screen.cursor_style;
                 self.terminal.advance(&bytes);
+                if self.terminal.screen.take_bells() != 0 {
+                    self.handle_bell();
+                }
                 if previous_alt_screen != self.terminal.screen.in_alternate_screen()
                     || previous_view_offset != self.terminal.screen.view_offset
                 {
@@ -733,6 +790,9 @@ fn main() -> Result<()> {
         next_cursor_blink: Instant::now()
             + Duration::from_millis(config_blink_ms),
         next_text_blink: Instant::now() + Duration::from_millis(800),
+        focus: FocusTracker::default(),
+        bell_limiter: BellLimiter::default(),
+        bell_flash_until: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
