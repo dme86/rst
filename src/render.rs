@@ -2227,4 +2227,94 @@ mod tests {
         assert!(pixels.iter().any(|&px| px != 0));
     }
 
+
+    #[test]
+    fn copy_fade_tints_only_cells_tagged_as_the_last_command_output() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(32, 4, 2, palette);
+        term.advance(b"prompt> \x1b]133;C\x07hello\x1b]133;D\x07");
+        term.screen.show_cursor = false;
+        let (_, id) = term.screen.command_capture.latest_output_with_id().unwrap();
+
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut before = vec![0u32; width * height];
+        renderer.draw(&mut before, width, height, &term.screen, None, None);
+
+        let mut clear = before.clone();
+        renderer.draw_output_copy_highlight(
+            &mut clear, width, height, &term.screen, id, 0,
+        );
+        assert_eq!(clear, before);
+
+        let mut highlighted = before.clone();
+        renderer.draw_output_copy_highlight(
+            &mut highlighted, width, height, &term.screen, id, 255,
+        );
+        let y_start = renderer.padding;
+        let x_prompt_end = renderer.padding + 8 * renderer.cell_width;
+        let x_output_end = renderer.padding + 13 * renderer.cell_width;
+        for y in y_start..y_start + renderer.cell_height {
+            let row = y * width;
+            assert_eq!(
+                &highlighted[row + renderer.padding..row + x_prompt_end],
+                &before[row + renderer.padding..row + x_prompt_end],
+                "Prompt pixels must not be highlighted",
+            );
+        }
+        let mut output_changed = false;
+        for y in y_start..y_start + renderer.cell_height {
+            let row = y * width;
+            if highlighted[row + x_prompt_end..row + x_output_end]
+                != before[row + x_prompt_end..row + x_output_end]
+            {
+                output_changed = true;
+                break;
+            }
+        }
+        assert!(output_changed, "Copied output must visibly highlight");
+        assert_eq!(term.screen.grid[0][8].ch, 'h');
+        assert_eq!(term.screen.grid[0][0].ch, 'p');
+    }
+
+    #[test]
+    fn copy_card_uses_fade_clock_and_does_not_modify_terminal_data() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(48, 8, 0, palette);
+        term.advance(b"original text");
+        term.screen.show_cursor = false;
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut before = vec![0u32; width * height];
+        renderer.draw(&mut before, width, height, &term.screen, None, None);
+        let notice = crate::copy_feedback::CopyNotice::success(3 * 1024, 1, std::time::Instant::now());
+        let mut pixels = before.clone();
+        renderer.draw_copy_notice(&mut pixels, width, height, &term.screen, &notice, 0);
+        assert_eq!(pixels, before);
+        renderer.draw_copy_notice(&mut pixels, width, height, &term.screen, &notice, 255);
+        assert_ne!(pixels, before);
+        assert_eq!(term.screen.grid[0][0].ch, 'o');
+        assert_eq!(term.screen.history.len(), 0);
+    }
+
+    #[test]
+    fn blended_rectangle_clips_to_surface_and_preserves_other_pixels() {
+        let mut pixels = vec![0x101010; 8 * 6];
+        blend_rect(&mut pixels, 8, 6, 2, 1, 3, 2, 0x00ff00, 255);
+        assert_eq!(pixels[0], 0x101010);
+        assert_eq!(pixels[1 * 8 + 2], 0x00ff00);
+        assert_eq!(pixels[2 * 8 + 4], 0x00ff00);
+        assert_eq!(pixels[3 * 8 + 3], 0x101010);
+        blend_rect(&mut pixels, 8, 6, 100, 100, 30, 30, 0xff0000, 255);
+        assert_eq!(pixels[0], 0x101010);
+        blend_rect(&mut pixels, 8, 6, 0, 0, 8, 6, 0xffffff, 0);
+        assert_eq!(pixels[0], 0x101010);
+    }
+
 }
