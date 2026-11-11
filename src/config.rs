@@ -11,6 +11,8 @@ pub struct Config {
     pub scrollback: ScrollbackConfig,
     pub terminal: TerminalConfig,
     pub clipboard: ClipboardConfig,
+    #[serde(default)]
+    pub bell: BellConfig,
     pub colors: Colors,
 }
 
@@ -53,6 +55,23 @@ pub struct ClipboardConfig {
     /// Disabled by default; clipboard reads are never supported.
     #[serde(default)]
     pub osc52_write: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct BellConfig {
+    /// Master switch for BEL notifications.
+    pub enabled: bool,
+    /// Native system sound on macOS; optional libcanberra on Wayland.
+    pub audible: bool,
+    /// Brief two-pixel border flash, works without a sound theme.
+    pub visual: bool,
+}
+
+impl Default for BellConfig {
+    fn default() -> Self {
+        Self { enabled: true, audible: true, visual: true }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -122,6 +141,27 @@ pub fn load() -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bell_defaults_and_backward_compatibility() {
+        let config: Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert!(config.bell.enabled);
+        assert!(config.bell.audible);
+        assert!(config.bell.visual);
+
+        // Old user configurations without a bell table still deserialize.
+        let mut value: toml::Value =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        value.as_table_mut().unwrap().remove("bell");
+        let legacy: Config = value.try_into().unwrap();
+        assert!(legacy.bell.enabled && legacy.bell.audible && legacy.bell.visual);
+
+        let partial: BellConfig = toml::from_str("audible = false").unwrap();
+        assert!(partial.enabled);
+        assert!(!partial.audible);
+        assert!(partial.visual);
+    }
 
     #[test]
     fn cursor_style_config_supports_block_underline_and_bar() {
