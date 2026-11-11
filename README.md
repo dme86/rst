@@ -100,6 +100,15 @@ copying a truncated command**. Only text is copied, never raw control
 sequences. Clipboard writes require `[clipboard].enabled = true` but do
 not require OSC 52 clipboard write permissions.
 
+### Responsive input under load
+
+Each session sends keyboard input, pastes and terminal replies through an
+ordered background writer. A child that stops reading cannot block the window.
+Pending input is bounded to 16 MiB and 1024 queued writes; if either limit is
+reached, rst rejects the new input with a warning. Bracketed pastes are accepted
+or rejected as a whole, including their opening and closing markers. Closing
+a tab discards its remaining queued input.
+
 ### Browse recent command-output URLs
 
 Press **Cmd+Shift+U** on macOS or **Ctrl+Shift+U** on Wayland to open

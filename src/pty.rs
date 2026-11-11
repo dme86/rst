@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Write},
+    io::Read,
     thread,
     sync::mpsc::{self, SyncSender},
     ops::Deref,
@@ -15,6 +15,7 @@ use winit::event_loop::EventLoopProxy;
 pub enum UserEvent {
     Output { tab_id: u64, bytes: OutputChunk },
     Closed { tab_id: u64 },
+    InputError { tab_id: u64, message: String },
 }
 
 // Bound queued output to 1 MiB per session. Returning a credit on drop also
@@ -41,7 +42,9 @@ impl Drop for OutputChunk {
 
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: crate::pty_input::PtyInput,
+    proxy: EventLoopProxy<UserEvent>,
+    tab_id: u64,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
     shell_name: String,
     foreground_name: Option<String>,
@@ -79,7 +82,12 @@ impl PtySession {
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
+        let input_proxy = proxy.clone();
+        let writer = crate::pty_input::PtyInput::start(
+            pair.master.take_writer()?, format!("rst-pty-writer-{tab_id}"),
+            move |message| { let _ = input_proxy.send_event(UserEvent::InputError { tab_id, message }); },
+        )?;
+        let session_proxy = proxy.clone();
 
         let (credit, available) = mpsc::sync_channel(OUTPUT_QUEUE_CHUNKS);
         for _ in 0..OUTPUT_QUEUE_CHUNKS {
@@ -113,6 +121,8 @@ impl PtySession {
         Ok(Self {
             master: pair.master,
             writer,
+            proxy: session_proxy,
+            tab_id,
             _child: child,
             shell_name,
             foreground_name: None,
@@ -150,8 +160,14 @@ impl PtySession {
     }
 
     pub fn write(&mut self, data: &[u8]) {
-        if let Err(err) = self.writer.write_all(data).and_then(|_| self.writer.flush()) {
-            eprintln!("rst: PTY write: {err}");
+        self.write_parts(&[data]);
+    }
+
+    pub fn write_parts(&mut self, parts: &[&[u8]]) {
+        if let Err(err) = self.writer.enqueue(parts) {
+            let _ = self.proxy.send_event(UserEvent::InputError {
+                tab_id: self.tab_id, message: err.to_string(),
+            });
         }
     }
 

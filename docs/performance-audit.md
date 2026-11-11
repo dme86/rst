@@ -57,5 +57,25 @@ and `cargo build --release`.
 
 Tests and benchmarks here ran on macOS. Wayland GUI behavior, native IME,
 end-to-end startup timing, dependency advisories, and long-running interactive
-load testing were not validated by this review. PTY input writes remain
-synchronous; a child that stops reading a large paste can still delay the UI.
+load testing were not validated by this review.
+
+## Follow-up: asynchronous PTY input
+
+PTY input is now sent by a dedicated worker per session. Keyboard input,
+pastes, mouse reports and terminal replies share one ordered queue; the GUI
+never waits for the child to read. Pending input, including the write in flight,
+is limited to 16 MiB and 1024 queued writes. Enqueueing never waits for space:
+a full queue rejects the complete new write with an input warning. Bracketed
+paste markers and their payload form one transaction, so capacity rejection
+cannot leave the shell inside an unfinished paste. Previously accepted writes
+retain their order and are not truncated to make room.
+
+Write failures are reported through the GUI event loop. A failure after a
+partial OS write can have already delivered part of that input; it is not
+retried automatically. Closing a session cancels remaining queued writes and
+never waits for the writer thread. A currently blocked OS write can remain
+blocked until the child/PTY closes; it cannot stall the GUI.
+
+Deterministic regression tests simulate a blocked child and short writes,
+verify exact byte ordering and paste framing, exercise both queue limits,
+and check error reporting and cancellation without joining a blocked worker.

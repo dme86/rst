@@ -11,6 +11,7 @@ mod mouse;
 mod macos_icon;
 mod osc;
 mod pty;
+mod pty_input;
 mod process_name;
 mod render;
 mod selection;
@@ -549,9 +550,7 @@ impl App {
                 // The PTY wants CR for newlines; bracketed paste protects shell editing.
                 let text = value.replace("\r\n", "\n").replace('\n', "\r");
                 if self.terminal.screen.bracketed_paste {
-                    self.pty.write(b"\x1b[200~");
-                    self.pty.write(text.as_bytes());
-                    self.pty.write(b"\x1b[201~");
+                    self.pty.write_parts(&[b"\x1b[200~", text.as_bytes(), b"\x1b[201~"]);
                 } else {
                     self.pty.write(text.as_bytes());
                 }
@@ -1509,6 +1508,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.update_ime_cursor_area();
                 if let Some(window) = &self.window {
                     window.request_redraw();
+                }
+            }
+            UserEvent::InputError { tab_id, message } => {
+                eprintln!("rst: tab {tab_id}: {message}");
+                if tab_id == self.active_tab_id {
+                    let mut notice = CopyNotice::warning(message, Instant::now());
+                    notice.title = "INPUT ERROR".into();
+                    self.present_notice(notice);
                 }
             }
             UserEvent::Closed { tab_id } => {
