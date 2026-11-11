@@ -118,8 +118,33 @@ does not scroll until a *new* printable character reaches the end of a full row.
 
 See the parser and screen regressions in `src/vt_modes_tests.rs`. This is a
 **core VT/DEC milestone**, not a claim to implement every historical DEC
-extension: character-set switching, DECSLRM and specialized status-line or
-reporting extensions are still pending.
+extension: DECSLRM and specialized status-line or reporting extensions
+are still pending.
+
+### DEC character sets (VT100 line drawing)
+
+`rst` supports the same DEC Special Graphics translation table as suckless
+`st`: designate a register with `ESC ( 0` (G0), `ESC ) 0` (G1),
+`ESC * 0` (G2) or `ESC + 0` (G3). `0` chooses DEC line drawing;
+`B` restores US ASCII for that register. Use `SO`/`SI` (bytes 0x0e/0x0f)
+to switch between G1 and G0, or `ESC n`/`ESC o` to invoke G2/G3.
+
+Draw a box directly in a shell:
+
+```sh
+printf '\033(0lqqk\r\nx  x\r\nmqqj\033(B\n'
+```
+
+The sequence produces `┌──┐`, `│  │` and `└──┘` using plain ASCII
+characters `l`, `q`, `k`, `x`, `m` and `j`. It also includes the complete
+st VT100 symbol table (arrows, shading, mathematical and control symbols).
+The translated Unicode glyphs are stored in terminal cells, so rendering,
+scrollback and copying select the same visible text. ASCII/UTF-8 not
+covered by the DEC table remains unchanged; SGR and alternate-screen
+switches do not discard the designation. DECSTR and RIS restore ASCII.
+
+Regression tests: `src/charset.rs` and `src/charset_tests.rs`. Like
+upstream `st`, unsupported national/legacy charset designations are ignored.
 
 ### SGR text attributes (st compatibility)
 
