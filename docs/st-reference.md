@@ -103,6 +103,20 @@ vendor or translate upstream C source.
   are always denied, even when clipboard writes are enabled.
 - Parser and state tests live in src/osc.rs and src/osc_tests.rs.
 
+## Cursor shape (DECSCUSR) implemented
+
+- Implements CSI Ps SP q with xterm/st shapes: blinking or steady block
+  (1/2), underline (3/4), and bar (5/6). Ps=0 or omitted restores the
+  configured default; unsupported values are ignored.
+- Configuration supports cursor.style = block, underline or bar and
+  cursor.blink true/false. Cursor style selection and DECTCEM visibility
+  remain independent, as do glyph SGR blink and cursor blink.
+- Block keeps the existing cell-background overlay; underline and bar
+  draw thin pixel-clipped strokes after the text pass. Scrollback, hidden
+  cursor and blink-off frames suppress the overlay.
+- Soft reset (DECSTR) and full reset (RIS) restore the configured cursor.
+- Regression vectors in src/cursor_tests.rs plus pixel tests in src/render.rs.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
