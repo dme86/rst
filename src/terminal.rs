@@ -1378,6 +1378,10 @@ mod vt_modes_tests;
 mod osc_tests;
 
 #[cfg(test)]
+#[path = "cursor_tests.rs"]
+mod cursor_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
