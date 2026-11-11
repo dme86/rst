@@ -5,7 +5,6 @@ pub const TAB_COLUMNS: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct TabDisplay {
-    pub id: u64,
     pub title: String,
     pub active: bool,
     pub unread: bool,
