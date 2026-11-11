@@ -537,8 +537,9 @@ impl Renderer {
         }
     }
 
-    /// Render composition above the already drawn terminal grid. No cell
-    /// or scrollback mutation occurs until winit emits Ime::Commit.
+    /// Render the composition as temporary grouped glyph runs. An Arabic or
+    /// Indic word must be shaped as a *run*, not as isolated characters.
+    /// Split only at a visual row, style/selection, or fallback-font boundary.
     fn draw_preedit(
         &mut self,
         pixels: &mut [u32],
@@ -556,48 +557,81 @@ impl Renderer {
         let padding = self.padding;
         let ascent = self.ascent;
         let font_size = self.font_size;
-        for glyph in layout.glyphs {
+        let style = TextStyle::UNDERLINE;
+
+        // Backdrops are individual grid rectangles even when the font
+        // substitutes multiple characters with one ligature glyph.
+        for glyph in &layout.glyphs {
             let x = padding.saturating_add(glyph.col.saturating_mul(cell_w));
             let y = padding.saturating_add(glyph.row.saturating_mul(cell_h));
-            let cell_width = glyph.cells * cell_w;
             let bg = if glyph.selected { screen.palette.cursor }
                 else { screen.palette.selection };
-            let fg = if glyph.selected { screen.palette.background }
-                else { screen.palette.foreground };
-            rect(pixels, width, height, x, y, cell_width, cell_h, bg);
+            rect(pixels, width, height, x, y, glyph.cells * cell_w, cell_h, bg);
+        }
 
-            // Copy the existing Cell layout rather than rebuilding all of
-            // its color-provenance fields. Only the temporary overlay is
-            // changed; the actual terminal buffer stays untouched.
-            if let Some(&original) = screen.display_row(glyph.row).get(glyph.col) {
-                let mut cell = original;
-                // NFC composes common dead-key sequences (e + combining
-                // acute => é), so the preview does not silently drop the
-                // accent while the OS is still composing the input.
-                let composed: String = glyph.text.nfc().collect();
-                let mut chars = composed.chars();
-                cell.ch = chars.next().unwrap_or(' ');
-                cell.width = glyph.cells as u8;
-                cell.style = TextStyle::UNDERLINE;
-                if cell.ch != ' ' && !cell.ch.is_control() {
-                    self.draw_glyph(pixels, width, height, x, y, cell, fg, (0, 0));
-                }
-                // Remaining combining marks have zero advance: overlay
-                // their glyph where supported by the selected font. ZWJ
-                // scripts still require a shaping engine in the future.
-                for mark in chars {
-                    if UnicodeWidthChar::width(mark) == Some(0)
-                        && !matches!(mark, '\u{200d}' | '\u{fe0f}')
-                    {
-                        cell.ch = mark;
-                        self.draw_glyph(pixels, width, height, x, y, cell, fg, (0, 0));
+        let glyphs = &layout.glyphs;
+        let mut i = 0;
+        while i < glyphs.len() {
+            let start = i;
+            let selected = glyphs[i].selected;
+            let row = glyphs[i].row;
+            let first = glyphs[i].text.chars().next().unwrap_or(' ');
+            let face = self.face_choice(first, style);
+            let mut text = String::new();
+            let mut next_col = glyphs[i].col;
+            while i < glyphs.len()
+                && glyphs[i].row == row
+                && glyphs[i].selected == selected
+                && glyphs[i].col == next_col
+                && self.face_choice(glyphs[i].text.chars().next().unwrap_or(' '), style) == face
+            {
+                text.push_str(&glyphs[i].text);
+                next_col += glyphs[i].cells;
+                i += 1;
+            }
+            let x = padding.saturating_add(glyphs[start].col.saturating_mul(cell_w));
+            let y = padding.saturating_add(row.saturating_mul(cell_h));
+            let slot_width = (next_col - glyphs[start].col) * cell_w;
+            let fg = if selected { screen.palette.background }
+                else { screen.palette.foreground };
+            let shaped = self.draw_shaped_text(
+                pixels, width, height, x, y,
+                slot_width, &text, fg, style, face,
+            );
+            if !shaped {
+                // Malformed/unavailable OpenType data: retain the previous
+                // fontdue/NFC preview path, not a blank composition.
+                for glyph in &glyphs[start..i] {
+                    let Some(&original) = screen.display_row(glyph.row).get(glyph.col) else {
+                        continue;
+                    };
+                    let mut cell = original;
+                    let composed: String = glyph.text.nfc().collect();
+                    let mut chars = composed.chars();
+                    cell.ch = chars.next().unwrap_or(' ');
+                    cell.width = glyph.cells as u8;
+                    cell.style = style;
+                    let gx = padding.saturating_add(glyph.col.saturating_mul(cell_w));
+                    let gy = padding.saturating_add(glyph.row.saturating_mul(cell_h));
+                    if cell.ch != ' ' && !cell.ch.is_control() {
+                        self.draw_glyph(pixels, width, height, gx, gy, cell, fg, (0, 0));
+                    }
+                    for mark in chars {
+                        if UnicodeWidthChar::width(mark) == Some(0)
+                            && !matches!(mark, '\u{200d}' | '\u{fe0f}')
+                        {
+                            cell.ch = mark;
+                            self.draw_glyph(pixels, width, height, gx, gy, cell, fg, (0, 0));
+                        }
                     }
                 }
-                // A thin underline indicates ongoing, uncommitted input.
+            }
+            for glyph in &glyphs[start..i] {
+                let gx = padding.saturating_add(glyph.col.saturating_mul(cell_w));
+                let gy = padding.saturating_add(glyph.row.saturating_mul(cell_h));
                 paint_decorations(
-                    pixels, width, height, x, y,
-                    cell_width, cell_h, ascent, font_size,
-                    TextStyle::UNDERLINE, fg,
+                    pixels, width, height, gx, gy,
+                    glyph.cells * cell_w, cell_h, ascent, font_size, style, fg,
                 );
             }
         }
