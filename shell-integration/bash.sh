@@ -10,12 +10,13 @@ __rst_precmd() {
     # next foreground command, then removes itself before execution.
     if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
         if [[ ${__rst_debug_trap_available:-0} == 1 ]]; then
-            trap '__rst_preexec' DEBUG
+            __rst_ready=1
         fi
     fi
 }
 __rst_preexec() {
-    trap - DEBUG
+    [[ ${__rst_ready:-0} == 1 ]] || return 0
+    __rst_ready=0
     printf '\033]133;C\a'
 }
 # Append our hook *last* so an older Bash DEBUG trap does not fire while
@@ -26,6 +27,8 @@ else
     __rst_debug_trap_available=0
     if [[ -z $(trap -p DEBUG) ]]; then
         __rst_debug_trap_available=1
+        __rst_ready=0
+        trap '__rst_preexec' DEBUG
     fi
 fi
 PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__rst_precmd"
