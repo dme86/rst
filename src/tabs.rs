@@ -64,6 +64,22 @@ impl BarLayout {
     }
 }
 
+/// Neighbor selection is independent of session storage order. Tabs in
+/// the inactive-session Vec may be swap_removed without affecting the UI.
+pub fn relative_tab(order: &[u64], active: u64, step: isize) -> Option<u64> {
+    if order.len() < 2 { return None; }
+    let current = order.iter().position(|id| *id == active)?;
+    let next = (current as isize + step).rem_euclid(order.len() as isize) as usize;
+    order.get(next).copied()
+}
+
+pub fn successor_after_close(order: &[u64], active: u64) -> Option<u64> {
+    if order.len() < 2 { return None; }
+    let current = order.iter().position(|id| *id == active)?;
+    let next = if current + 1 < order.len() { current + 1 } else { current - 1 };
+    order.get(next).copied()
+}
+
 pub fn bar_height(cell_height: usize, enabled: bool) -> usize {
     if enabled { cell_height.saturating_add(6) } else { 0 }
 }
@@ -103,6 +119,20 @@ mod tests {
         assert_eq!(layout.hit_test(4, 5, true), None);
         assert_eq!(bar_height(18, false), 0);
         assert_eq!(bar_height(18, true), 24);
+    }
+
+    #[test]
+    fn tab_order_survives_switch_and_close_and_wraps() {
+        let order = [12, 3, 27, 2];
+        assert_eq!(relative_tab(&order, 3, 1), Some(27));
+        assert_eq!(relative_tab(&order, 12, -1), Some(2));
+        assert_eq!(relative_tab(&order, 2, 1), Some(12));
+        assert_eq!(relative_tab(&order, 27, 0), Some(27));
+        assert_eq!(relative_tab(&order, 99, 1), None);
+        assert_eq!(successor_after_close(&order, 3), Some(27));
+        assert_eq!(successor_after_close(&order, 2), Some(27));
+        assert_eq!(successor_after_close(&[12], 12), None);
+        assert_eq!(successor_after_close(&order, 99), None);
     }
 
     #[test]
