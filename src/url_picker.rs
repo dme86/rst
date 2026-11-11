@@ -29,16 +29,21 @@ pub fn extract_urls(output: &str, limit: usize) -> Vec<String> {
             continue;
         }
         let mut end = 0;
+        let mut too_long = false;
         for (offset, ch) in remainder.char_indices() {
             if ch.is_whitespace() || ch.is_control()
                 || matches!(ch, '<' | '>' | '"' | '\'' | '\\' | '|' | '\u{60}')
-                || offset + ch.len_utf8() > MAX_URL_BYTES
             {
+                break;
+            }
+            if offset + ch.len_utf8() > MAX_URL_BYTES {
+                too_long = true;
                 break;
             }
             end = offset + ch.len_utf8();
         }
-        if end <= prefix.len() {
+        // Never offer a clipped URL as if it were complete.
+        if too_long || end <= prefix.len() {
             continue;
         }
         let mut url = &remainder[..end];
