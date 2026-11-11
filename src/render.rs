@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use fontdb::{Database, Family, Query, Style, Weight};
 use fontdue::{Font, FontSettings, Metrics};
+use unicode_normalization::UnicodeNormalization;
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
     config::FontConfig,
@@ -357,11 +359,27 @@ impl Renderer {
             // changed; the actual terminal buffer stays untouched.
             if let Some(&original) = screen.display_row(glyph.row).get(glyph.col) {
                 let mut cell = original;
-                cell.ch = glyph.text.chars().next().unwrap_or(' ');
+                // NFC composes common dead-key sequences (e + combining
+                // acute => é), so the preview does not silently drop the
+                // accent while the OS is still composing the input.
+                let composed: String = glyph.text.nfc().collect();
+                let mut chars = composed.chars();
+                cell.ch = chars.next().unwrap_or(' ');
                 cell.width = glyph.cells as u8;
                 cell.style = TextStyle::UNDERLINE;
                 if cell.ch != ' ' && !cell.ch.is_control() {
                     self.draw_glyph(pixels, width, height, x, y, cell, fg, (0, 0));
+                }
+                // Remaining combining marks have zero advance: overlay
+                // their glyph where supported by the selected font. ZWJ
+                // scripts still require a shaping engine in the future.
+                for mark in chars {
+                    if UnicodeWidthChar::width(mark) == Some(0)
+                        && !matches!(mark, '\u{200d}' | '\u{fe0f}')
+                    {
+                        cell.ch = mark;
+                        self.draw_glyph(pixels, width, height, x, y, cell, fg, (0, 0));
+                    }
                 }
                 // A thin underline indicates ongoing, uncommitted input.
                 paint_decorations(
