@@ -4,7 +4,7 @@ use unicode_width::UnicodeWidthChar;
 use unicode_segmentation::UnicodeSegmentation;
 use vte::{Params, Parser, Perform};
 
-use crate::{charset::CharacterSet, command_capture::CommandCapture, config::Colors, mouse::MouseTracking, osc, selection::Selection};
+use crate::{charset::CharacterSet, command_capture::CommandCapture, config::Colors, mouse::MouseTracking, osc, selection::Selection, tab_naming};
 
 pub const DEFAULT_TITLE: &str = "rst — Rust Simple Terminal";
 
@@ -261,6 +261,10 @@ pub struct Screen {
     initial_palette: Palette,
     pub title: String,
     pub icon_title: String,
+    /// Event-driven shell metadata for native tab labels; never persisted.
+    pub cwd: Option<String>,
+    pub foreground_program: Option<String>,
+    pub tab_label_revision: u64,
     pub osc52_write_allowed: bool,
     clipboard_writes: Vec<String>,
     pub command_capture: CommandCapture,
@@ -349,6 +353,9 @@ impl Screen {
             palette,
             title: DEFAULT_TITLE.to_string(),
             icon_title: DEFAULT_TITLE.to_string(),
+            cwd: None,
+            foreground_program: None,
+            tab_label_revision: 0,
             osc52_write_allowed: false,
             clipboard_writes: Vec::new(),
             command_capture: CommandCapture::default(),
@@ -992,6 +999,22 @@ impl Screen {
                     if code == 0 || code == 1 { self.icon_title = title; }
                 }
             }
+            7 => {
+                // OSC 7;file://host/absolute/path, emitted at shell prompts.
+                // Restore semicolons in paths split by the VTE OSC parser.
+                let mut raw = Vec::new();
+                for (i, segment) in params[1..].iter().enumerate() {
+                    if i != 0 { raw.push(b';'); }
+                    if raw.len().saturating_add(segment.len()) > 4096 { return; }
+                    raw.extend_from_slice(segment);
+                }
+                if let Some(cwd) = tab_naming::cwd_from_osc7(&raw) {
+                    if self.cwd.as_ref() != Some(&cwd) {
+                        self.cwd = Some(cwd);
+                        self.tab_label_revision = self.tab_label_revision.wrapping_add(1);
+                    }
+                }
+            }
             4 => {
                 // OSC 4 accepts multiple index;spec pairs in one string.
                 let mut updated = false;
@@ -1050,9 +1073,21 @@ impl Screen {
             }
             110..=112 => self.reset_osc_color(code),
             133 => {
-                // OSC 133;A/B/C/D shell integration. Only the first byte
-                // after ';' is meaningful; e.g. D;0 includes exit status.
-                if let Some(marker) = params.get(1).and_then(|part| part.first()) {
+                // OSC 133;E;<program> provides a validated executable name.
+                // Existing A/B/C/D capture markers retain their semantics.
+                if params.get(1).copied() == Some(b"E") {
+                    if let Some(program) = params.get(2)
+                        .and_then(|value| tab_naming::program_from_osc133(value))
+                    {
+                        if self.foreground_program.as_deref() != Some(&program) {
+                            self.foreground_program = Some(program);
+                            self.tab_label_revision = self.tab_label_revision.wrapping_add(1);
+                        }
+                    }
+                } else if let Some(marker) = params.get(1).and_then(|part| part.first()) {
+                    if matches!(marker, b'A' | b'D') && self.foreground_program.take().is_some() {
+                        self.tab_label_revision = self.tab_label_revision.wrapping_add(1);
+                    }
                     self.command_capture.marker(*marker);
                 }
             },
