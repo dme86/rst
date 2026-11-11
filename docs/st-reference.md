@@ -168,11 +168,28 @@ vendor or translate upstream C source.
 - Tests: `src/attention.rs`, `src/attention_tests.rs`, and pixel assertions
   in `src/render.rs`.
 
+## Native IME / preedit (implemented)
+
+- Enable winit 0.30 `Window::set_ime_allowed(true)` on macOS and Wayland.
+  `WindowEvent::Ime::{Enabled, Preedit, Commit, Disabled}` updates
+  independent composition state. Only committed UTF-8 bytes enter PTY.
+- Show temporary underlined preedit on top of terminal cells, with
+  candidate selection and caret positioned using UTF-8 byte offsets.
+  Native candidate popups follow the caret via `set_ime_cursor_area`.
+- Segment preedit into grapheme clusters; Unicode-width determines cell
+  geometry for CJK and emoji. Do not split multi-codepoint clusters.
+- Keyboard lock and focus loss cancel input safely; ordinary key encoder
+  remains responsible for shortcuts outside composition.
+- Tests in `src/ime_tests.rs` and `src/render.rs` cover composition lifecycle,
+  Unicode byte positions, candidate selection, overflow and isolation.
+- st uses XIM under X11; rst deliberately targets native AppKit input
+  services and Wayland text-input-v3 via winit instead.
+
 ## Known gaps (prototype)
 - ANSI/VT support is intentionally incomplete, especially DECSLRM,
   character sets, DCS, status lines and complex terminal queries.
 - Full Unicode grapheme shaping, zero-width joining and ligatures.
 - Modern negotiated keyboard protocols (CSI-u/kitty) and advanced mouse extensions outside upstream st.
 - Native Wayland clipboard without compositor data-control extensions.
-- IME/preedit integration, hyperlinks, synchronized output, and clipboard read prompts.
+- Advanced script shaping/ligatures, hyperlinks, synchronized output, and clipboard read prompts.
 - Automated comparison tests against a pinned upstream st revision.
