@@ -189,11 +189,10 @@ impl App {
     }
 
     fn switch_relative_tab(&mut self, step: isize) {
-        let len = self.tab_order.len();
-        if !self.config.tabs.enabled || len < 2 { return; }
-        let current = self.active_tab_index();
-        let next = (current as isize + step).rem_euclid(len as isize) as usize;
-        self.switch_tab(self.tab_order[next]);
+        if !self.config.tabs.enabled { return; }
+        if let Some(next) = tabs::relative_tab(&self.tab_order, self.active_tab_id, step) {
+            self.switch_tab(next);
+        }
     }
 
     fn new_tab(&mut self) {
@@ -248,13 +247,9 @@ impl App {
             return true;
         }
         if id == self.active_tab_id {
-            let at = self.active_tab_index();
-            let next = if at + 1 < self.tab_order.len() {
-                self.tab_order[at + 1]
-            } else {
-                self.tab_order[at - 1]
-            };
-            self.switch_tab(next);
+            if let Some(next) = tabs::successor_after_close(&self.tab_order, id) {
+                self.switch_tab(next);
+            }
         }
         if let Some(position) = self.inactive_tabs.iter().position(|tab| tab.id == id) {
             let mut old = self.inactive_tabs.swap_remove(position);
