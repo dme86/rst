@@ -7,6 +7,8 @@ mod help;
 mod ime;
 mod keyboard;
 mod mouse;
+#[cfg(target_os = "macos")]
+mod macos_icon;
 mod osc;
 mod pty;
 mod render;
@@ -658,6 +660,10 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        // Make the Dock and Cmd+Tab use the checked-in logo even if this
+        // binary was started with cargo run (no .app / Launch Services).
+        #[cfg(target_os = "macos")]
+        macos_icon::install();
         let renderer =
             match Renderer::new(&self.config.font, self.config.window.padding, window.scale_factor()) {
                 Ok(renderer) => renderer,

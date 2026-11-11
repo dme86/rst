@@ -24,7 +24,11 @@ vte = "0.15"
 winit = { version = "0.30.13", default-features = false, features = ["wayland", "rwh_06"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# The same winit binary uses the native AppKit backend on macOS.
+# Use native AppKit to set the embedded README logo at runtime, including
+# when rst is started via cargo run rather than via its .app bundle.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSImage"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData"] }
 
 [profile.release]
 lto = "thin"

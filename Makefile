@@ -34,6 +34,9 @@ install-macos: macos-release ## Install the native app into ~/Applications (macO
 	@mkdir -p "$(HOME)/Applications"
 	@rm -rf "$(HOME)/Applications/rst.app"
 	cp -R ./target/release/rst.app "$(HOME)/Applications/rst.app"
+	@touch "$(HOME)/Applications/rst.app"
+	@lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"; \
+	  if [ -x "$$lsregister" ]; then "$$lsregister" -f "$(HOME)/Applications/rst.app" >/dev/null 2>&1 || true; fi
 
 test: ## Run unit tests locally (no GitHub Actions)
 	$(CARGO) test

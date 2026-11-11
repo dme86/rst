@@ -1350,8 +1350,12 @@ fn paint_backgrounds_with_cursor(
             if x >= width {
                 break;
             }
+            // Extend only the *underlying* background to unused window
+            // pixels. A block cursor is an overlay, not a terminal-cell
+            // background: stretching its color into the bottom/right
+            // remainder makes it grow after long output or a resize.
             let (_, background) = cell_colors_with_cursor(
-                screen, row, col, cell, selection, show_cursor,
+                screen, row, col, cell, selection, false,
             );
             let start_x = if col == 0 { 0 } else { x };
             let end_x = if col + cell.width as usize >= screen.cols {
@@ -1371,6 +1375,31 @@ fn paint_backgrounds_with_cursor(
                 background,
             );
         }
+    }
+
+    // Paint the block cursor strictly inside its one grid cell. The regular
+    // renderer redraws the same exact rectangle during its glyph pass;
+    // the separate layer also keeps paint_backgrounds() correct for callers
+    // and regression tests, without tinting fractional window padding.
+    if show_cursor && cursor_is_visible(screen)
+        && screen.cursor_style.shape == CursorShape::Block
+        && screen.x < screen.cols && screen.y < screen.rows
+    {
+        let row = screen.y;
+        let mut col = screen.x;
+        let cells = screen.display_row(row);
+        if cells[col].width == 0 && col > 0 {
+            col -= 1; // leading cell of a double-width character
+        }
+        let cell = cells[col];
+        let (_, color) = cell_colors_with_cursor(
+            screen, row, screen.x, cells[screen.x], selection, true,
+        );
+        let x = padding.saturating_add(col.saturating_mul(cell_width));
+        let y = padding.saturating_add(row.saturating_mul(cell_height));
+        rect(pixels, width, height, x, y,
+             cell_width.saturating_mul(cell.width.max(1) as usize),
+             cell_height, color);
     }
 }
 
@@ -1554,6 +1583,79 @@ mod tests {
         assert_eq!(pixels[0], screen.palette.cursor);
         // Only the actual cursor cell should use the cursor color.
         assert_eq!(pixels[5], screen.palette.background);
+    }
+
+    #[test]
+    fn block_cursor_at_bottom_right_stays_exactly_one_cell() {
+        let mut screen = test_screen();
+        screen.show_cursor = true;
+        screen.x = 1;
+        screen.y = 1;
+        screen.grid[1][1].bg = 0x334455;
+        let (width, height) = (13, 10); // 2x2 grid of 5x4 + 3x2 remainder
+        let mut pixels = vec![0; width * height];
+        paint_backgrounds(&mut pixels, width, height, &screen, 5, 4, 0, None);
+        assert_eq!(pixels[4 * width + 5], screen.palette.cursor);
+        assert_eq!(pixels[7 * width + 9], screen.palette.cursor);
+        assert_eq!(pixels[7 * width + 10], 0x334455,
+                   "right-edge remainder must keep underlying color");
+        assert_eq!(pixels[8 * width + 5], 0x334455,
+                   "bottom-edge remainder must keep underlying color");
+        assert_eq!(pixels[9 * width + 12], 0x334455);
+        screen.cursor_blink_on = false;
+        paint_backgrounds(&mut pixels, width, height, &screen, 5, 4, 0, None);
+        assert_eq!(pixels[4 * width + 5], 0x334455);
+    }
+
+    #[test]
+    fn cat_like_output_at_bottom_row_never_stretches_block_cursor() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(2, 2, 2, palette);
+        // A long file leaves the cursor at the bottom after scrollback.
+        terminal.advance(b"a\r\nb\r\nc\r\n");
+        terminal.screen.x = 1;
+        terminal.screen.y = 1;
+        terminal.screen.show_cursor = true;
+        terminal.screen.cursor_blink_on = true;
+        terminal.screen.grid[1][1].bg = 0x334455;
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else {
+            return; // Some CI machines do not have a usable font.
+        };
+        let width = renderer.cell_width * 2 + renderer.padding * 2 + 3;
+        let height = renderer.cell_height * 2 + renderer.padding * 2 + 3;
+        let x = renderer.padding + renderer.cell_width;
+        let y = renderer.padding + renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &terminal.screen, None, None);
+        assert_eq!(pixels[y * width + x], terminal.screen.palette.cursor);
+        assert_eq!(
+            pixels[(y + renderer.cell_height) * width + x],
+            0x334455,
+            "cursor color must end at the exact bottom of its terminal cell",
+        );
+        assert_eq!(
+            pixels[y * width + x + renderer.cell_width],
+            0x334455,
+            "cursor color must end at the exact right edge of its terminal cell",
+        );
+    }
+
+    #[test]
+    fn block_cursor_does_not_fill_window_gutters_when_padding_is_nonzero() {
+        let mut screen = test_screen();
+        screen.show_cursor = true;
+        screen.x = 0;
+        screen.y = 0;
+        screen.grid[0][0].bg = 0x223344;
+        let (width, height) = (16, 16);
+        let mut pixels = vec![0; width * height];
+        paint_backgrounds(&mut pixels, width, height, &screen, 5, 4, 2, None);
+        assert_eq!(pixels[0], 0x223344, "outer padding is not part of cursor");
+        assert_eq!(pixels[2 * width + 2], screen.palette.cursor);
+        assert_eq!(pixels[5 * width + 6], screen.palette.cursor);
+        assert_eq!(pixels[5 * width + 7], screen.palette.background);
     }
 
     #[test]

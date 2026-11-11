@@ -34,4 +34,14 @@ for entry in '16 icon_16x16' '32 icon_16x16@2x' '32 icon_32x32' \
   sips -z "$1" "$1" "$icon" --out "$iconset/$2.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/rst.icns"
-echo "rst: packaged $app"
+# Preserve the exact README icon in the bundle as well. The application
+# also embeds it at compile time for its live Dock/Cmd-Tab icon.
+cp "$icon" "$app/Contents/Resources/logo.png"
+touch "$app"
+# macOS caches icon metadata by bundle identity. Explicitly re-register
+# the updated bundle; avoid globally clearing caches or restarting Dock.
+lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ -x "$lsregister" ]; then
+  "$lsregister" -f "$app" >/dev/null 2>&1 || true
+fi
+echo "rst: packaged $app with assets/logo.png"
