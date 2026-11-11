@@ -1,3 +1,4 @@
+mod charset;
 mod config;
 mod keyboard;
 mod mouse;
