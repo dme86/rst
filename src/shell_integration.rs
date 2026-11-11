@@ -125,6 +125,8 @@ mod tests {
             assert!(script.contains("133;B") || script.contains("133;C"));
             assert!(script.contains("133;C"));
             assert!(script.contains("133;D"));
+            assert!(script.contains("133;E;"));
+            assert!(script.contains("7;file://localhost"));
         }
     }
 

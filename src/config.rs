@@ -96,6 +96,8 @@ pub struct TabsConfig {
     pub max_tabs: usize,
     pub position: String,
     pub close_buttons: bool,
+    /// smart, directory, title, or shell; does not require process polling.
+    pub name_mode: String,
     pub colors: TabColors,
 }
 
@@ -106,6 +108,7 @@ impl Default for TabsConfig {
             max_tabs: 10,
             position: "top".into(),
             close_buttons: true,
+            name_mode: "smart".into(),
             colors: TabColors::default(),
         }
     }
@@ -221,6 +224,9 @@ pub fn load() -> Result<Config> {
         "tabs.max_tabs must be 1..32");
     anyhow::ensure!(matches!(config.tabs.position.as_str(), "top" | "bottom"),
         "tabs.position must be top or bottom");
+    anyhow::ensure!(matches!(config.tabs.name_mode.as_str(),
+        "smart" | "directory" | "title" | "shell"),
+        "tabs.name_mode must be smart, directory, title or shell");
     for color in [
         &config.tabs.colors.background, &config.tabs.colors.foreground,
         &config.tabs.colors.inactive_background, &config.tabs.colors.active_background,
@@ -259,12 +265,14 @@ mod tests {
         assert!(!base.tabs.enabled);
         assert_eq!(base.tabs.max_tabs, 10);
         assert_eq!(base.tabs.position, "top");
+        assert_eq!(base.tabs.name_mode, "smart");
         assert_eq!(base.tabs.colors.active_background, "#fabd2f");
         let mut legacy: toml::Value = toml::from_str(include_str!("../config/default.toml")).unwrap();
         legacy.as_table_mut().unwrap().remove("tabs");
         let parsed: Config = legacy.try_into().unwrap();
         assert!(!parsed.tabs.enabled);
         assert_eq!(parsed.tabs.colors.active_background, "#fabd2f");
+        assert_eq!(parsed.tabs.name_mode, "smart");
         let partial: TabsConfig = toml::from_str("enabled = true").unwrap();
         assert!(partial.enabled);
         assert_eq!(partial.max_tabs, 10);

@@ -160,3 +160,59 @@ fn saved_cursor_palette_references_update_after_color_change() {
     t.advance(b"\x1b[31m\x1b7\x1b[0m\x1b]4;1;#fedcba\x07\x1b8Q");
     assert_eq!(t.screen.grid[0][0].fg, 0xfedcba);
 }
+
+
+#[test]
+fn osc7_updates_cwd_without_altering_window_title_or_command_output() {
+    let mut t = terminal();
+    let original = t.screen.title.clone();
+    t.advance(b"\x1b]7;file://localhost/Users/dan/code/rst\x07");
+    assert_eq!(t.screen.cwd.as_deref(), Some("/Users/dan/code/rst"));
+    assert_eq!(t.screen.title, original);
+    let revision = t.screen.tab_label_revision;
+    t.advance(b"\x1b]7;file://localhost/Users/dan/code/rst\x07");
+    assert_eq!(t.screen.tab_label_revision, revision);
+    t.advance(b"\x1b]7;file://localhost/Users/dan/code/hello%20world\x1b\\");
+    assert_eq!(t.screen.cwd.as_deref(), Some("/Users/dan/code/hello world"));
+    t.advance(b"\x1b]7;file://localhost/path%0Aevil\x07");
+    assert_eq!(t.screen.cwd.as_deref(), Some("/Users/dan/code/hello world"));
+}
+
+#[test]
+fn osc133_metadata_tracks_running_program_and_resets_to_cwd() {
+    let mut t = terminal();
+    t.advance(b"\x1b]7;file://localhost/Users/dan/code/rst\x07");
+    t.advance(b"\x1b]133;A\x07\x1b]133;B\x07");
+    t.advance(b"\x1b]133;E;k9s\x07\x1b]133;C\x07");
+    assert_eq!(t.screen.foreground_program.as_deref(), Some("k9s"));
+    assert!(t.screen.command_capture.running());
+    let title = crate::tab_naming::label(
+        t.screen.cwd.as_deref(), t.screen.foreground_program.as_deref(),
+        &t.screen.title, t.screen.command_capture.running(),
+        "fish", "smart", Some("/Users/dan"), 11,
+    );
+    assert_eq!(title, "k9s");
+    t.advance(b"some output\n\x1b]133;D\x07");
+    assert_eq!(t.screen.foreground_program, None);
+    assert!(!t.screen.command_capture.running());
+    let title = crate::tab_naming::label(
+        t.screen.cwd.as_deref(), t.screen.foreground_program.as_deref(),
+        &t.screen.title, t.screen.command_capture.running(),
+        "fish", "smart", Some("/Users/dan"), 11,
+    );
+    assert_eq!(title, "~/code/rst");
+    assert_eq!(t.screen.command_capture.latest_output(), Ok("some output\n".into()));
+}
+
+#[test]
+fn osc133_program_metadata_is_not_part_of_output_capture() {
+    let mut t = terminal();
+    t.advance(b"\x1b]133;E;nvim\x07");
+    assert_eq!(t.screen.foreground_program.as_deref(), Some("nvim"));
+    assert!(!t.screen.command_capture.saw_markers());
+    t.advance(b"\x1b]133;C\x07\x1b]133;E;malicious;extra\x07");
+    assert_eq!(t.screen.foreground_program.as_deref(), Some("nvim"));
+    t.advance(b"text\x1b]133;D\x07");
+    assert_eq!(t.screen.foreground_program, None);
+    assert_eq!(t.screen.command_capture.latest_output(), Ok("text".into()));
+}
