@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Parser, Perform};
 
-use crate::{config::Colors, mouse::MouseTracking, osc, selection::Selection};
+use crate::{charset::CharacterSet, config::Colors, mouse::MouseTracking, osc, selection::Selection};
 
 pub const DEFAULT_TITLE: &str = "rst — Rust Simple Terminal";
 
@@ -226,6 +226,10 @@ pub struct Screen {
     pub auto_wrap: bool,
     pub insert_mode: bool,
     pub newline_mode: bool,
+    // Four G0..G3 designation registers and the currently invoked GL set.
+    // Kept globally across primary/alternate-screen swaps, as in st.
+    charsets: [CharacterSet; 4],
+    active_charset: usize,
     pub palette: Palette,
     initial_palette: Palette,
     pub title: String,
@@ -302,6 +306,8 @@ impl Screen {
             auto_wrap: true,
             insert_mode: false,
             newline_mode: false,
+            charsets: [CharacterSet::Ascii; 4],
+            active_charset: 0,
             fg: palette.foreground,
             bg: palette.background,
             fg_source: ColorSource::DefaultForeground,
@@ -599,6 +605,10 @@ impl Screen {
     }
 
     fn put_char(&mut self, ch: char) {
+        // Apply the currently invoked DEC character set before measuring
+        // glyph width or writing the cell. Selection and clipboard then see
+        // the real Unicode line-drawing character instead of an ASCII alias.
+        let ch = self.charsets[self.active_charset].map(ch);
         let width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width == 0 || width > 2 {
             // TODO: merge combining marks into grapheme clusters.
@@ -1033,6 +1043,9 @@ impl Screen {
         self.focus_reporting = false;
         self.bracketed_paste = false;
         self.style = TextStyle::default();
+        // DECSTR restores the initial designations and invokes ASCII G0.
+        self.charsets = [CharacterSet::Ascii; 4];
+        self.active_charset = 0;
         self.fg = self.palette.foreground;
         self.bg = self.palette.background;
         self.fg_source = ColorSource::DefaultForeground;
@@ -1124,6 +1137,8 @@ impl Perform for Screen {
 
     fn execute(&mut self, byte: u8) {
         match byte {
+            0x0e => self.active_charset = 1, // SO / LS1: invoke G1
+            0x0f => self.active_charset = 0, // SI / LS0: invoke G0
             b'\r' => {
                 self.x = 0;
                 self.wrap_pending = false;
@@ -1314,10 +1329,30 @@ impl Perform for Screen {
             }
             return;
         }
+        // ESC ( / ) / * / + designates a set into G0/G1/G2/G3.
+        // vte delivers the designator as one escape intermediate and the
+        // following 0 or B as the final byte, even across PTY read chunks.
+        if intermediates.len() == 1 {
+            let slot = match intermediates[0] {
+                b'(' => Some(0),
+                b')' => Some(1),
+                b'*' => Some(2),
+                b'+' => Some(3),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                if let Some(charset) = CharacterSet::designate(action) {
+                    self.charsets[slot] = charset;
+                }
+                return;
+            }
+        }
         if !intermediates.is_empty() {
             return;
         }
         match action {
+            b'n' => self.active_charset = 2, // LS2: invoke G2
+            b'o' => self.active_charset = 3, // LS3: invoke G3
             b'=' => self.app_keypad = true,  // DECKPAM
             b'>' => self.app_keypad = false, // DECKPNM
             b'D' => self.linefeed(),
