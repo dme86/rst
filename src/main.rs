@@ -45,7 +45,7 @@ use crate::{
     render::Renderer,
     selection::{ClickTracker, Selection},
     terminal::{CursorShape, CursorStyle, Palette, Terminal},
-    url_picker::{self, UrlPicker},
+    url_picker::UrlPicker,
 };
 
 struct App {
