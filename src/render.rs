@@ -202,6 +202,201 @@ impl Renderer {
         self.shape_cache.clear();
     }
 
+    /// Use the same fallback/variant decision for shaping as glyph rasterization.
+    fn face_choice(&self, ch: char, style: TextStyle) -> (usize, u8) {
+        let index = self.fonts.iter().position(|font| font.has_glyph(ch)).unwrap_or(0);
+        let bold = style.contains(TextStyle::BOLD);
+        let italic = style.contains(TextStyle::ITALIC);
+        let preferred: &[u8] = match (bold, italic) {
+            (true, true) => &[3, 2, 1],
+            (true, false) => &[1],
+            (false, true) => &[2],
+            _ => &[],
+        };
+        let variant = preferred.iter().copied().find(|&candidate| {
+            self.styled_fonts[index][candidate as usize - 1]
+                .as_ref().is_some_and(|font| font.has_glyph(ch))
+        }).unwrap_or(0);
+        (index, variant)
+    }
+
+    fn indexed_font(&self, face: (usize, u8)) -> &Font {
+        if face.1 == 0 {
+            &self.fonts[face.0]
+        } else {
+            self.styled_fonts[face.0][face.1 as usize - 1]
+                .as_ref().expect("variant selected from available face")
+        }
+    }
+
+    fn font_source(&self, face: (usize, u8)) -> Option<&FontBytes> {
+        if face.1 == 0 {
+            self.font_sources.get(face.0)
+        } else {
+            self.styled_sources.get(face.0)?
+                [face.1 as usize - 1].as_ref()
+        }
+    }
+
+    /// Rasterize Rustybuzz's substituted glyph IDs with fontdue, using
+    /// identical font bytes/face index. Fit advances to the terminal grid:
+    /// shaping may substitute and join glyphs but cannot move the cursor or
+    /// change the reserved width of the caller's cell span.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_shaped_text(
+        &mut self,
+        pixels: &mut [u32],
+        stride: usize,
+        height: usize,
+        x: usize,
+        y: usize,
+        slot_width: usize,
+        text: &str,
+        fg: u32,
+        style: TextStyle,
+        face: (usize, u8),
+    ) -> bool {
+        if slot_width == 0 || text.is_empty() {
+            return false;
+        }
+        let cache_key = (face.0, face.1, self.ligatures, text.to_owned());
+        let shaped = if let Some(hit) = self.shape_cache.get(&cache_key) {
+            hit.clone()
+        } else {
+            let Some(source) = self.font_source(face) else { return false };
+            let Some(result) = shaping::shape(source, text, self.ligatures) else {
+                return false;
+            };
+            if self.shape_cache.len() >= 1024 {
+                self.shape_cache.clear();
+            }
+            self.shape_cache.insert(cache_key, result.clone());
+            result
+        };
+        if shaped.total_advance <= 0 || shaped.units_per_em <= 0.0 {
+            return false;
+        }
+
+        let em_scale = self.font_size / shaped.units_per_em;
+        let natural = shaped.total_advance as f32 * em_scale;
+        let horizontal = slot_width as f32 / natural;
+        // Extremely non-monospace fallback faces should not stretch a
+        // single glyph beyond recognition; use legacy rendering instead.
+        if !(0.4..=3.0).contains(&horizontal) {
+            return false;
+        }
+        let baseline = self.ascent
+            + (self.cell_height as i32 - self.font_size.ceil() as i32).max(0) / 2;
+        let face_font = self.indexed_font(face);
+        let mut pen: i64 = 0;
+        for item in &shaped.glyphs {
+            let gid = item.index;
+            let size = self.font_size;
+            let bitmap = self.indexed_glyphs.entry((face.0, face.1, gid))
+                .or_insert_with(|| {
+                    let (metrics, bitmap) = face_font.rasterize_indexed(gid, size);
+                    Glyph { metrics, bitmap }
+                });
+            let metrics = &bitmap.metrics;
+            let offset_x = ((pen + item.x_offset as i64) as f32 * em_scale * horizontal)
+                .round() as i64;
+            let px = x as i64 + offset_x + metrics.xmin as i64;
+            let py = y as i64 + baseline as i64
+                - metrics.ymin as i64 - metrics.height as i64
+                - (item.y_offset as f32 * em_scale).round() as i64;
+            for dy in 0..metrics.height {
+                let ty = py + dy as i64;
+                if ty < y as i64 || ty >= y.saturating_add(self.cell_height) as i64
+                    || ty < 0 || ty >= height as i64 { continue; }
+                for dx in 0..metrics.width {
+                    let tx = px + dx as i64;
+                    if tx < x as i64 || tx >= x.saturating_add(slot_width) as i64
+                        || tx < 0 || tx >= stride as i64 { continue; }
+                    let alpha = bitmap.bitmap[dy * metrics.width + dx];
+                    if alpha == 0 { continue; }
+                    let index = ty as usize * stride + tx as usize;
+                    pixels[index] = blend(fg, pixels[index], alpha);
+                    if style.contains(TextStyle::BOLD)
+                        && face.1 != 1 && face.1 != 3
+                        && tx + 1 < stride as i64
+                        && tx + 1 < x.saturating_add(slot_width) as i64
+                    {
+                        pixels[index + 1] = blend(fg, pixels[index + 1], alpha);
+                    }
+                }
+            }
+            pen += item.x_advance as i64;
+        }
+        true
+    }
+
+    /// Shape only homogeneous runs. Never cross an SGR/selection/cursor,
+    /// fallback-font or Powerline boundary: doing so would move glyph ink
+    /// across a TUI's colored cells or break column-based selection.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_shaped_row(
+        &mut self,
+        pixels: &mut [u32],
+        stride: usize,
+        height: usize,
+        screen: &Screen,
+        row: usize,
+        selection: Option<Selection>,
+        show_cursor: bool,
+    ) -> Vec<bool> {
+        let cells = screen.display_row(row);
+        let mut covered = vec![false; screen.cols];
+        let mut col = 0usize;
+        while col < screen.cols {
+            let start = col;
+            let cell = cells[start];
+            if cell.width == 0 || cell.ch.is_control()
+                || is_nerd_icon(cell.ch) || matches!(cell.ch as u32, 0xe0b0..=0xe0b3)
+                || !cell.style.visible(screen.text_blink_on)
+            {
+                col += 1;
+                continue;
+            }
+            let face = self.face_choice(cell.ch, cell.style);
+            let colors = cell_colors_with_cursor(screen, row, start, cell, selection, show_cursor);
+            let mut text = String::new();
+            let mut end = start;
+            while end < screen.cols && end - start < 96 {
+                let c = cells[end];
+                if c.width == 0 {
+                    end += 1;
+                    continue;
+                }
+                if c.ch.is_control() || is_nerd_icon(c.ch)
+                    || matches!(c.ch as u32, 0xe0b0..=0xe0b3)
+                    || c.style != cell.style
+                    || !c.style.visible(screen.text_blink_on)
+                    || self.face_choice(c.ch, c.style) != face
+                    || cell_colors_with_cursor(screen, row, end, c, selection, show_cursor) != colors
+                {
+                    break;
+                }
+                text.push_str(&c.text());
+                end += c.width as usize;
+            }
+            if end > start && shaping::needs_shaping(&text, self.ligatures) {
+                let y = self.padding.saturating_add(row.saturating_mul(self.cell_height));
+                let ink = effective_ink_color(cell.style, colors.0, colors.1);
+                if self.draw_shaped_text(
+                    pixels, stride, height,
+                    self.padding.saturating_add(start.saturating_mul(self.cell_width)),
+                    y, (end - start) * self.cell_width, &text, ink, cell.style, face,
+                ) {
+                    covered[start..end].fill(true);
+                    col = end;
+                    continue;
+                }
+            }
+            col = start + cell.width.max(1) as usize;
+        }
+        covered
+    }
+
     /// Returns bitmap plus whether bold / italic should be synthesized.
     /// Style choice is cached independently to avoid mixing glyph variants.
     fn glyph(&mut self, ch: char, style: TextStyle) -> (&Glyph, bool, bool) {
