@@ -205,3 +205,18 @@ For a longer idle sample:
 ```sh
 python3 scripts/benchmark.py --runs 1 --idle-seconds 20 --output target/benchmarks/long-idle.json
 ```
+
+### Native cursor placement regression
+
+The initial compositor change assumed that top-origin framebuffer coordinates
+could be used directly for nested layer frames. With a flipped NSView backing
+layer this placed the cursor at the vertically mirrored position. Placement now
+converts y according to the backing layer orientation and recalculates it on
+resize, even when cached patch pixels are unchanged.
+
+A native regression test renders the actual cursor layer over a softbuffer-like
+image layer into a Core Graphics bitmap. An asymmetric pixel pattern must match
+the framebuffer exactly, for flipped/unflipped roots, scale factors 1 and 2,
+positions near the top and bottom, and resizing through the cached-image path.
+This covers the native geometry that the earlier renderer-only pixel test did
+not exercise. The additional bitmap-context dependency features are test-only.
