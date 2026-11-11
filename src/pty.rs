@@ -13,9 +13,9 @@ use winit::event_loop::EventLoopProxy;
 
 #[derive(Debug)]
 pub enum UserEvent {
-    Output { tab_id: u64, bytes: OutputChunk },
-    Closed { tab_id: u64 },
-    InputError { tab_id: u64, message: String },
+    Output { session_id: u64, bytes: OutputChunk },
+    Closed { session_id: u64 },
+    InputError { session_id: u64, message: String },
 }
 
 // Bound queued output to 1 MiB per session. Returning a credit on drop also
@@ -45,7 +45,7 @@ pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: crate::pty_input::PtyInput,
     proxy: EventLoopProxy<UserEvent>,
-    tab_id: u64,
+    session_id: u64,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
     shell_name: String,
     foreground_name: Option<String>,
@@ -53,11 +53,18 @@ pub struct PtySession {
 
 impl PtySession {
     pub fn start(
-        tab_id: u64,
+        session_id: u64,
         cols: usize,
         rows: usize,
         term: &str,
         proxy: EventLoopProxy<UserEvent>,
+    ) -> Result<Self> {
+        Self::start_in_dir(session_id, cols, rows, term, proxy, None)
+    }
+
+    pub fn start_in_dir(
+        session_id: u64, cols: usize, rows: usize, term: &str,
+        proxy: EventLoopProxy<UserEvent>, cwd: Option<&str>,
     ) -> Result<Self> {
         let system = native_pty_system();
         let pair = system.openpty(PtySize {
@@ -72,6 +79,7 @@ impl PtySession {
             .file_name().and_then(|part| part.to_str()).unwrap_or("sh")
             .to_owned();
         let mut command = CommandBuilder::new(&shell);
+        if let Some(cwd) = cwd { command.cwd(cwd); }
         command.env("TERM", term);
         command.env("COLORTERM", "truecolor");
         // Shell hooks activate only inside rst, never in unrelated terminals.
@@ -85,8 +93,8 @@ impl PtySession {
         let mut reader = pair.master.try_clone_reader()?;
         let input_proxy = proxy.clone();
         let writer = crate::pty_input::PtyInput::start(
-            pair.master.take_writer()?, format!("rst-pty-writer-{tab_id}"),
-            move |message| { let _ = input_proxy.send_event(UserEvent::InputError { tab_id, message }); },
+            pair.master.take_writer()?, format!("rst-pty-writer-{session_id}"),
+            move |message| { let _ = input_proxy.send_event(UserEvent::InputError { session_id, message }); },
         )?;
         let session_proxy = proxy.clone();
         let profiling = std::env::var_os("RST_PROFILE").is_some();
@@ -96,7 +104,7 @@ impl PtySession {
             credit.send(()).expect("credit receiver is alive");
         }
         thread::Builder::new()
-            .name(format!("rst-pty-reader-{tab_id}"))
+            .name(format!("rst-pty-reader-{session_id}"))
             .spawn(move || {
                 let mut buffer = [0u8; OUTPUT_CHUNK_BYTES];
                 while available.recv().is_ok() {
@@ -104,7 +112,7 @@ impl PtySession {
                         Ok(0) => break,
                         Ok(n) => {
                             if proxy.send_event(UserEvent::Output {
-                                tab_id,
+                                session_id,
                                 bytes: OutputChunk { bytes: buffer[..n].to_vec(), queued_at: profiling.then(std::time::Instant::now), credit: credit.clone() },
                             }).is_err() {
                                 break;
@@ -117,14 +125,14 @@ impl PtySession {
                         Err(_) => break,
                     }
                 }
-                let _ = proxy.send_event(UserEvent::Closed { tab_id });
+                let _ = proxy.send_event(UserEvent::Closed { session_id });
             })?;
 
         Ok(Self {
             master: pair.master,
             writer,
             proxy: session_proxy,
-            tab_id,
+            session_id,
             _child: child,
             shell_name,
             foreground_name: None,
@@ -168,7 +176,7 @@ impl PtySession {
     pub fn write_parts(&mut self, parts: &[&[u8]]) {
         if let Err(err) = self.writer.enqueue(parts) {
             let _ = self.proxy.send_event(UserEvent::InputError {
-                tab_id: self.tab_id, message: err.to_string(),
+                session_id: self.session_id, message: err.to_string(),
             });
         }
     }

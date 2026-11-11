@@ -669,7 +669,8 @@ impl Renderer {
                  top + bar_h.saturating_sub(1), width, 1.min(bar_h), accent);
         }
 
-        let layout = BarLayout::for_width(items.len(), active_index, screen.cols);
+        let columns = (width.saturating_sub(self.padding * 2) / self.cell_width).max(1);
+        let layout = BarLayout::for_width(items.len(), active_index, columns);
         for (slot, index) in (layout.first..layout.first + layout.count).enumerate() {
             let item = &items[index];
             let x = self.padding.saturating_add(
@@ -704,7 +705,7 @@ impl Renderer {
             }
         }
         let plus_column = 1 + layout.count * layout.slot_columns;
-        if plus_column + 1 < screen.cols {
+        if plus_column + 1 < columns {
             let plus_x = self.padding.saturating_add(plus_column * self.cell_width);
             self.draw_ui_text(pixels, width, height,
                 plus_x, top.saturating_add(3), "+", accent, 1, screen);
@@ -1799,6 +1800,15 @@ fn blend_rect(
             *pixel = blend(color, *pixel, alpha);
         }
     }
+}
+
+/// One-pixel focus outline, clipped to the pane, outside normal text padding.
+pub fn paint_pane_focus(pixels: &mut [u32], width: usize, height: usize, pane: crate::panes::Rect, color: u32) {
+    if pane.width == 0 || pane.height == 0 { return; }
+    rect(pixels, width, height, pane.x, pane.y, pane.width, 1, color);
+    rect(pixels, width, height, pane.x, pane.y + pane.height - 1, pane.width, 1, color);
+    rect(pixels, width, height, pane.x, pane.y, 1, pane.height, color);
+    rect(pixels, width, height, pane.x + pane.width - 1, pane.y, 1, pane.height, color);
 }
 
 /// Subtle, short visual BEL indicator. Draw *after* the terminal glyphs;

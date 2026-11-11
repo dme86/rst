@@ -14,7 +14,7 @@ vendor or translate upstream C source.
 | st.info | terminfo capabilities | future terminfo compatibility work |
 
 ## Priorities
-- Keep one PTY process per window, no tabs or embedded shell.
+- Keep one independent PTY process per pane; tabs group bounded split trees. No embedded shell.
 - Implement VT commands as explicit state transitions and unit tests.
 - Keep windowing/graphics independent from the terminal model.
 - macOS AppKit and Linux/Wayland are equally important.

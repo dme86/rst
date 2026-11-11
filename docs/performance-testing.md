@@ -232,3 +232,33 @@ transition filtering; SGR text blinking remains independent.
 
 Regression checks cover no software wakeups while unfocused, fresh resume timing,
 and actual native animation removal/recreation with unchanged cursor pixels.
+
+## Split-pane validation
+
+Split layouts have deterministic tests for nested geometry, directional focus,
+collapse after close, stable tab identity after its original pane exits, exact
+shortcut modifiers, and tiny windows. A further 32,000 randomized split/close/
+resize operations check unique session IDs, valid focused panes and bounds.
+Framebuffer tests verify both direct drawing of full-width panes (no staging
+allocation) and copying narrow panes without touching neighbors or the tab bar.
+
+Native macOS interaction was also checked in a separate test app: left/right
+and nested top/bottom splits, independent shell process IDs and `stty size`,
+directional keyboard focus, click focus, closing the original pane, preserving
+layouts across tabs, shell exit, and closing the last pane of a nonfinal tab.
+The focused cursor stayed at its prompt in each layout. Wayland execution was
+not available; its layout and shortcut paths are covered by the unit tests.
+
+Full-width panes draw directly into their framebuffer slice. Narrow panes
+reuse one scratch buffer per window. One renderer/font cache remains shared;
+only the focused pane owns the cursor animation and blink deadlines. Background
+panes display steady text; hidden tabs parse without repainting ordinary output.
+
+A release single-pane control run after the direct-render fast path measured
+11.2 MiB/s median parsed load, 3.37 ms load roundtrip p95, and no measurable
+idle CPU increment. Main-to-first-frame times were 214–268 ms. Controlled
+fixture startup was variable in that run (prompt-frame median 860 ms), so that
+number alone is not evidence of a terminal rendering regression. An additional
+fixture-ready timestamp diagnostic measured readiness at 240–351 ms after spawn
+and prompt-frame submission at 276–364 ms, with the same 11.2 MiB/s throughput.
+These are local diagnostic samples rather than cross-platform guarantees.

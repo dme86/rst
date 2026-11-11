@@ -82,6 +82,8 @@ fn encode(code: u16, at: (usize, usize), sgr: bool, released: bool) -> Vec<u8> {
 }
 
 impl MouseReporter {
+    pub fn dragging(&self) -> bool { self.pressed != 0 }
+
     /// Forget held buttons on focus loss (and any fractional scroll state).
     pub fn reset(&mut self) {
         *self = Self::default();

@@ -100,6 +100,42 @@ copying a truncated command**. Only text is copied, never raw control
 sequences. Clipboard writes require `[clipboard].enabled = true` but do
 not require OSC 52 clipboard write permissions.
 
+### Split a tab into independent shells
+
+Split the focused pane into equal left/right or top/bottom halves. Splits can
+be nested, up to **8 panes per tab**, and also work when the tab bar is disabled.
+Each pane has its own shell, PTY, scrollback, command capture and application
+modes. New split shells inherit the focused pane's working directory when
+OSC 7 metadata provides an existing local directory.
+
+| Action | macOS | Wayland |
+| --- | --- | --- |
+| Split left/right (vertical divider) | **Cmd+D** | **Ctrl+Shift+D** |
+| Split top/bottom (horizontal divider) | **Cmd+Shift+D** | **Ctrl+Shift+E** |
+| Focus a neighboring pane | **Cmd+Option+Arrow** | **Ctrl+Shift+Arrow** |
+| Close the focused pane | **Cmd+W** | **Ctrl+Shift+W** |
+| Focus with the mouse | **Click inside the pane** | Same |
+
+The focused pane has a thin accent-colored outline and receives keyboard,
+clipboard, IME and mouse input. Scroll the focused pane with the wheel or the
+existing history shortcuts. Only its cursor blinks; losing window focus pauses
+blinking as before. Other visible panes continue receiving and displaying output
+with steady text and no cursor. Hidden tabs retain their layouts and last-focused
+pane without repainting on ordinary output.
+
+Closing a pane (or exiting its shell) expands its sibling into the freed space.
+Closing the last pane closes its tab; closing the last tab closes the window.
+The tab bar's **× closes the entire tab**, including all its panes. Tab-switching
+shortcuts stay unchanged, and F1 lists the split shortcuts.
+
+Window resizing and font zoom resize every pane's PTY, including those in hidden
+tabs, so full-screen applications receive their actual grid size. Extremely small
+windows clip panes safely; creating a new split requires at least 8 columns and
+3 rows per resulting pane. Split proportions are currently fixed at 50/50; divider
+dragging and persisted layouts are not implemented. Splits use the existing
+terminal resize behavior: prior lines are not fully reflowed, and narrowing a
+pane can truncate text beyond its new width.
+
 ### Robustness and performance checks
 
 `make stress` runs extended reproducible randomized tests, including resize,
@@ -232,18 +268,18 @@ grid size through PTY resize, including when switching tabs or zooming.
 | Action | macOS | Wayland |
 | --- | --- | --- |
 | New tab | **Cmd+T** | **Ctrl+Shift+T** |
-| Close current tab | **Cmd+W** | **Ctrl+Shift+W** |
+| Close focused pane (last pane closes tab) | **Cmd+W** | **Ctrl+Shift+W** |
 | Next / previous | **Ctrl+Tab / Ctrl+Shift+Tab** | Same |
 | Switch to tab 1–9 | **Cmd+1..9** | **Alt+1..9** |
 | Mouse | Click a tab, its **×**, or **+** | Same |
 
-Closing a tab terminates its shell; closing the final tab exits rst.
-A shell that exits on its own removes that tab, without closing other
-sessions. A green indicator marks background output until the tab is
+Closing a tab terminates all its pane shells; closing the final tab exits rst.
+A shell that exits on its own removes its pane (or its tab if it was the last
+pane), without closing other sessions. A green indicator marks background output until the tab is
 visited. When the bar is narrower than the tab list, it always displays
 the active tab, while keyboard shortcuts can reach the rest.
 
-**Performance:** only the active terminal is rendered; background tabs
+**Performance:** only panes in the active tab are rendered; background tabs
 process their PTY streams and respond to terminal queries but do not
 trigger per-output redraws. Tab content and cursor/scrollback state are
 preserved when switching, and only one renderer/font cache exists.
@@ -635,7 +671,7 @@ To inspect which font families rst found and identify missing glyph codepoints, 
 
 ## Scope
 
-One window and one PTY, with an owned terminal grid, ANSI parser, basic VT operations, 24-bit color, font fallback, bounded scrollback and native copy/paste. No tabs, Electron, GTK, X11, or XWayland; shell integration is opt-in. On Linux, the windowing backend is **Wayland-only**.
+One native window with optional tabs and nested split panes, an owned terminal grid per PTY, ANSI parsing, VT operations, 24-bit color, font fallback, bounded scrollback and native copy/paste. No Electron, GTK, X11, or XWayland; shell integration is opt-in. On Linux, the windowing backend is **Wayland-only**.
 
 This is a work-in-progress: extended VT modes, full bidirectional layout, color emoji rasterization, complete alt-screen compatibility and richer OSC security prompts remain to be implemented/tested. Linux clipboard integration currently relies on compositor data-control support; the macOS native clipboard is the primary first-run target.
 
