@@ -1089,6 +1089,22 @@ mod keyboard_tests {
     }
 
     #[test]
+    fn copy_output_and_help_shortcuts_are_platform_specific() {
+        let cmd_shift = ModifiersState::SUPER | ModifiersState::SHIFT;
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(command_shortcut(&Key::Character("O"), cmd_shift, true, "o"));
+        assert!(command_shortcut(&Key::Character("o"), ctrl_shift, false, "o"));
+        assert!(command_shortcut(&Key::Character("H"), cmd_shift, true, "h"));
+        assert!(command_shortcut(&Key::Character("h"), ctrl_shift, false, "h"));
+        assert!(!command_shortcut(&Key::Character("o"), ModifiersState::SUPER, true, "o"));
+        assert!(!command_shortcut(&Key::Character("o"), ctrl_shift, true, "o"));
+        assert!(!command_shortcut(&Key::Character("o"), cmd_shift, false, "o"));
+        assert!(!command_shortcut(
+            &Key::Character("o"), cmd_shift | ModifiersState::ALT, true, "o",
+        ));
+    }
+
+    #[test]
     fn font_zoom_changes_size_and_can_reset_to_configured_value() {
         assert_eq!(zoomed_font_size(15.0, 15.0, ZoomAction::In), 16.0);
         assert_eq!(zoomed_font_size(16.0, 15.0, ZoomAction::Out), 15.0);
