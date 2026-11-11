@@ -79,8 +79,9 @@ fn program_from_running_title(title: &str, shell: &str) -> Option<String> {
     }
     let first = title.split_whitespace().next()?;
     // Never mistake a CWD or user@host prompt title for a program.
-    if first == shell || first.starts_with(['/', '~', '.'])
-        || first.contains(['@', ':', '/', '\\'])
+    if first == shell
+        || first.chars().next().is_some_and(|ch| matches!(ch, '/' | '~' | '.'))
+        || first.chars().any(|ch| matches!(ch, '@' | ':' | '/' | '\\'))
     {
         return None;
     }
