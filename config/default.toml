@@ -54,6 +54,9 @@ enabled = false
 position = "top"         # "top" or "bottom"
 max_tabs = 10            # 1..32
 close_buttons = true
+# "smart": running program > cwd > OSC title > shell
+# Also: "directory", "title", "shell".
+name_mode = "smart"
 
 [tabs.colors]
 # Gruvbox-inspired theme, independently configurable from terminal colors.
