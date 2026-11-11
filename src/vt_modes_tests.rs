@@ -306,7 +306,7 @@ fn decstr_soft_reset_preserves_main_screen_and_scrollback() {
     let mut t = term(8, 3);
     t.advance(b"0\r\n1\r\n2\r\n3");
     let previous_history = t.screen.history.len();
-    t.advance(b"\x1b[2;3r\x1b[?6;7l\x1b[4h\x1b[3;31m");
+    t.advance(b"\x1b[2;3r\x1b[?6h\x1b[?7l\x1b[4h\x1b[3;31m");
     t.advance(b"\x1b[?1002;1006;1004h\x1b[1;3H");
     assert!(!t.screen.auto_wrap);
     assert!(t.screen.origin_mode);
