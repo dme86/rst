@@ -1225,4 +1225,97 @@ mod tests {
         assert!(renderer.glyphs.is_empty());
     }
 
+
+    #[test]
+    fn underline_cursor_is_a_thin_bottom_stroke_not_a_full_cell() {
+        let mut screen = test_screen();
+        screen.show_cursor = true;
+        screen.cursor_style = crate::terminal::CursorStyle {
+            shape: CursorShape::Underline,
+            blink: false,
+        };
+        screen.grid[0][0].bg = 0x112233;
+        let mut pixels = vec![0u32; 10 * 8];
+        paint_backgrounds(&mut pixels, 10, 8, &screen, 5, 4, 0, None);
+        assert_eq!(pixels[0], 0x112233);
+        paint_cursor(&mut pixels, 10, 8, &screen, 5, 4, 0);
+        for x in 0..5 {
+            assert_eq!(pixels[3 * 10 + x], screen.palette.cursor);
+            assert_eq!(pixels[0 * 10 + x], 0x112233);
+        }
+        assert_eq!(pixels[3 * 10 + 5], screen.palette.background);
+    }
+
+    #[test]
+    fn bar_cursor_is_a_thin_left_stroke_after_glyph_rendering() {
+        let mut screen = test_screen();
+        screen.show_cursor = true;
+        screen.cursor_style = crate::terminal::CursorStyle {
+            shape: CursorShape::Bar,
+            blink: false,
+        };
+        let mut pixels = vec![0x112233u32; 10 * 8];
+        paint_cursor(&mut pixels, 10, 8, &screen, 5, 4, 0);
+        for row in 0..4 {
+            assert_eq!(pixels[row * 10], screen.palette.cursor);
+            assert_eq!(pixels[row * 10 + 1], 0x112233);
+        }
+        assert_eq!(pixels[4 * 10], 0x112233);
+    }
+
+    #[test]
+    fn only_block_cursor_replaces_cell_background() {
+        let mut screen = test_screen();
+        screen.show_cursor = true;
+        screen.grid[0][0].bg = 0x223344;
+        for shape in [CursorShape::Underline, CursorShape::Bar] {
+            screen.cursor_style = crate::terminal::CursorStyle { shape, blink: false };
+            let mut pixels = vec![0u32; 10 * 8];
+            paint_backgrounds(&mut pixels, 10, 8, &screen, 5, 4, 0, None);
+            assert_eq!(pixels[0], 0x223344);
+        }
+        screen.cursor_style.shape = CursorShape::Block;
+        let mut pixels = vec![0u32; 10 * 8];
+        paint_backgrounds(&mut pixels, 10, 8, &screen, 5, 4, 0, None);
+        assert_eq!(pixels[0], screen.palette.cursor);
+    }
+
+    #[test]
+    fn hidden_blink_phase_and_scrollback_suppress_cursor_shapes() {
+        let mut screen = test_screen();
+        screen.show_cursor = true;
+        screen.cursor_style = crate::terminal::CursorStyle {
+            shape: CursorShape::Bar,
+            blink: true,
+        };
+        let mut pixels = vec![0x112233u32; 10 * 8];
+        screen.cursor_blink_on = false;
+        paint_cursor(&mut pixels, 10, 8, &screen, 5, 4, 0);
+        assert!(pixels.iter().all(|&pixel| pixel == 0x112233));
+        screen.cursor_blink_on = true;
+        screen.view_offset = 1;
+        paint_cursor(&mut pixels, 10, 8, &screen, 5, 4, 0);
+        assert!(pixels.iter().all(|&pixel| pixel == 0x112233));
+        screen.view_offset = 0;
+        screen.show_cursor = false;
+        paint_cursor(&mut pixels, 10, 8, &screen, 5, 4, 0);
+        assert!(pixels.iter().all(|&pixel| pixel == 0x112233));
+    }
+
+    #[test]
+    fn cursor_shapes_clip_safely_at_window_edges_and_small_cells() {
+        let mut screen = test_screen();
+        screen.show_cursor = true;
+        screen.x = 1;
+        screen.y = 1;
+        let mut pixels = vec![0x112233u32; 7 * 5];
+        for shape in [CursorShape::Underline, CursorShape::Bar] {
+            screen.cursor_style = crate::terminal::CursorStyle { shape, blink: false };
+            paint_cursor(&mut pixels, 7, 5, &screen, 5, 4, 0);
+        }
+        // Bar at x=5 and y=4 remains in bounds; underline begins at y=7
+        // and is correctly clipped beyond the physical surface.
+        assert_eq!(pixels[4 * 7 + 5], screen.palette.cursor);
+    }
+
 }
