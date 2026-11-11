@@ -220,15 +220,6 @@ impl Renderer {
         (index, variant)
     }
 
-    fn indexed_font(&self, face: (usize, u8)) -> &Font {
-        if face.1 == 0 {
-            &self.fonts[face.0]
-        } else {
-            self.styled_fonts[face.0][face.1 as usize - 1]
-                .as_ref().expect("variant selected from available face")
-        }
-    }
-
     fn font_source(&self, face: (usize, u8)) -> Option<&FontBytes> {
         if face.1 == 0 {
             self.font_sources.get(face.0)
@@ -287,7 +278,13 @@ impl Renderer {
         }
         let baseline = self.ascent
             + (self.cell_height as i32 - self.font_size.ceil() as i32).max(0) / 2;
-        let face_font = self.indexed_font(face);
+        // Borrow the font array and raster cache as disjoint fields.
+        let face_font = if face.1 == 0 {
+            &self.fonts[face.0]
+        } else {
+            self.styled_fonts[face.0][face.1 as usize - 1]
+                .as_ref().expect("variant selected from available face")
+        };
         let mut pen: i64 = 0;
         for item in &shaped.glyphs {
             let gid = item.index;
@@ -497,6 +494,9 @@ impl Renderer {
             if y >= height {
                 break;
             }
+            let shaped = self.draw_shaped_row(
+                pixels, width, height, screen, row, selection, preedit.is_none(),
+            );
             for (col, &cell) in screen.display_row(row).iter().enumerate() {
                 if cell.width == 0 {
                     continue;
@@ -512,7 +512,7 @@ impl Renderer {
                     screen, row, col, cell, selection, preedit.is_none(),
                 );
                 let ink = effective_ink_color(cell.style, fg, bg);
-                if cell.ch != ' ' {
+                if cell.ch != ' ' && !shaped[col] {
                     let spill = icon_spill(screen, row, col, cell, selection, self.cell_width);
                     self.draw_glyph(pixels, width, height, x, y, cell, ink, spill);
                 }
