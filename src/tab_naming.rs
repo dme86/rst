@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(base(true, "smart"), "nvim");
         assert_eq!(base(false, "smart"), "~/code/rst");
         assert_eq!(base(true, "directory"), "~/code/rst");
-        assert_eq!(base(true, "title"), "vim ~/code/…");
+        assert_eq!(base(true, "title"), "vim ~/code/r…");
         assert_eq!(base(true, "shell"), "fish");
     }
 
