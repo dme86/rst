@@ -41,7 +41,6 @@ fn graphics_mode_maps_ascii_symbol_table_but_not_unrelated_text() {
 fn g1_designation_is_inactive_until_so_and_si_reinvokes_g0() {
     let mut t = term(12, 3);
     t.advance(b"\x1b)0q\x0eqx\x0fq");
-    assert_eq!(&row(&t, 0)[..0], "");
     assert_eq!(t.screen.grid[0][0].ch, 'q');
     assert_eq!(t.screen.grid[0][1].ch, '─');
     assert_eq!(t.screen.grid[0][2].ch, '│');
