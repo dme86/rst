@@ -110,6 +110,16 @@ impl App {
         }
     }
 
+    fn scroll_scrollback(&mut self, lines: i32) {
+        let old_offset = self.terminal.screen.view_offset;
+        self.terminal.screen.scroll_view(lines);
+        if self.terminal.screen.view_offset != old_offset {
+            self.selection = None;
+            self.selecting = false;
+            self.clicks.reset();
+        }
+    }
+
     fn cell_at_mouse(&self) -> (usize, usize) {
         let Some(renderer) = &self.renderer else {
             return (0, 0);
@@ -245,7 +255,7 @@ impl App {
                 _ => None,
             };
             if let Some(lines) = scroll {
-                self.terminal.screen.scroll_view(lines);
+                self.scroll_scrollback(lines);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -588,7 +598,7 @@ impl ApplicationHandler<UserEvent> for App {
                         (pos.y / height).round() as i32
                     }
                 };
-                self.terminal.screen.scroll_view(lines);
+                self.scroll_scrollback(lines);
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -601,9 +611,18 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Output(bytes) => {
                 let previous_mouse_mode = self.terminal.screen.mouse_tracking;
+                let previous_alt_screen = self.terminal.screen.in_alternate_screen();
+                let previous_view_offset = self.terminal.screen.view_offset;
                 let previous_title = self.terminal.screen.title.clone();
                 let previous_cursor_style = self.terminal.screen.cursor_style;
                 self.terminal.advance(&bytes);
+                if previous_alt_screen != self.terminal.screen.in_alternate_screen()
+                    || previous_view_offset != self.terminal.screen.view_offset
+                {
+                    self.selection = None;
+                    self.selecting = false;
+                    self.clicks.reset();
+                }
                 if self.terminal.screen.cursor_style != previous_cursor_style {
                     self.next_cursor_blink = Instant::now()
                         + Duration::from_millis(self.config.cursor.blink_interval_ms);
