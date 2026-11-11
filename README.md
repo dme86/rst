@@ -87,8 +87,8 @@ Programs such as Neovim can override both the shape and blink behavior using
 | 3 / 4 | Blinking / steady underline |
 | 5 / 6 | Blinking / steady vertical bar |
 
-For a quick manual check, use `printf '\\033[5 q'` (blinking bar) and
-`printf '\\033[0 q'` (restore your default). With a steady cursor the
+For a quick manual check, use `printf '\033[5 q'` (blinking bar) and
+`printf '\033[0 q'` (restore your default). With a steady cursor the
 event loop does not schedule cursor-blink frames. Text blinking is independent.
 `CSI ? 25 l` still hides the cursor regardless of its shape.
 
