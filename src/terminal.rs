@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
 use vte::{Params, Parser, Perform};
 
 use crate::{charset::CharacterSet, config::Colors, mouse::MouseTracking, osc, selection::Selection};
@@ -101,6 +102,34 @@ pub struct Cell {
     pub style: TextStyle,
     /// Set on the final display cell when the next printable glyph soft-wraps.
     pub wrapped: bool,
+    /// Extra Unicode scalars in the same grapheme cluster (combining marks,
+    /// variation selectors, and ZWJ emoji parts). Fixed storage keeps Cell
+    /// Copy and makes history/insert/delete efficient and allocation-free.
+    pub combining: [char; 8],
+    pub combining_len: u8,
+}
+
+impl Cell {
+    pub fn text(self) -> String {
+        let mut out = String::from(self.ch);
+        for &ch in &self.combining[..self.combining_len as usize] {
+            out.push(ch);
+        }
+        out
+    }
+
+    pub fn append_combining(&mut self, ch: char) {
+        let count = self.combining_len as usize;
+        if count < self.combining.len() {
+            self.combining[count] = ch;
+            self.combining_len += 1;
+        }
+    }
+
+    fn ends_with_joiner(self) -> bool {
+        self.combining_len != 0
+            && self.combining[self.combining_len as usize - 1] == '\u{200d}'
+    }
 }
 
 #[derive(Clone)]
@@ -281,6 +310,8 @@ impl Screen {
             bg_source: ColorSource::DefaultBackground,
             style: TextStyle::default(),
             wrapped: false,
+            combining: ['\0'; 8],
+            combining_len: 0,
         };
         Self {
             cols,
@@ -445,6 +476,8 @@ impl Screen {
             // glyph that was previously at this location.
             style: TextStyle::default(),
             wrapped: false,
+            combining: ['\0'; 8],
+            combining_len: 0,
         }
     }
 
@@ -612,8 +645,36 @@ impl Screen {
         // the real Unicode line-drawing character instead of an ASCII alias.
         let ch = self.charsets[self.active_charset].map(ch);
         let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        // Associate zero-width marks, variation selectors and ZWJ-linked
+        // scalars with the preceding base cell, including a wide glyph's
+        // leading cell. This runs before DECAWM so a combining mark at the
+        // right edge never triggers an unwanted line wrap.
+        let previous = if self.wrap_pending {
+            Some((self.x, self.y))
+        } else if self.x > 0 {
+            Some((self.x - 1, self.y))
+        } else if self.y > 0 && self.grid[self.y - 1][self.cols - 1].wrapped {
+            Some((self.cols - 1, self.y - 1))
+        } else {
+            None
+        };
+        if let Some((mut x, y)) = previous {
+            if self.grid[y][x].width == 0 && x > 0 {
+                x -= 1;
+            }
+            let cell = &self.grid[y][x];
+            let same_grapheme = {
+                let mut candidate = cell.text();
+                candidate.push(ch);
+                UnicodeSegmentation::graphemes(candidate.as_str(), true).count() == 1
+            };
+            if width == 0 || same_grapheme && cell.ends_with_joiner() {
+                self.grid[y][x].append_combining(ch);
+                return;
+            }
+        }
         if width == 0 || width > 2 {
-            // TODO: merge combining marks into grapheme clusters.
+            // Orphan marks and unsupported widths do not consume a cell.
             return;
         }
         // A one-column terminal cannot hold a double-width glyph. Using a
@@ -657,6 +718,8 @@ impl Screen {
             bg_source,
             style: self.style,
             wrapped: false,
+            combining: ['\0'; 8],
+            combining_len: 0,
         };
         if width == 2 && self.x + 1 < self.cols {
             self.grid[self.y][self.x + 1] = Cell {
@@ -668,6 +731,8 @@ impl Screen {
                 bg_source,
                 style: self.style,
                 wrapped: false,
+            combining: ['\0'; 8],
+            combining_len: 0,
             };
         }
         if self.x + width == self.cols {
@@ -1330,6 +1395,8 @@ impl Perform for Screen {
                     bg_source,
                     style: self.style,
                     wrapped: false,
+            combining: ['\0'; 8],
+            combining_len: 0,
                 };
                 for row in &mut self.grid {
                     row.fill(cell);
