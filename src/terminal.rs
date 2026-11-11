@@ -364,33 +364,41 @@ impl Screen {
     // background, not the initial palette background. tmux relies on this
     // for coloured status lines and clear-to-end-of-line sequences.
     fn blank(&self) -> Cell {
-        let (fg, bg) = self.ink_colors();
+        let (fg, bg, fg_source, bg_source) = self.ink_colors_with_sources();
         Cell {
             ch: ' ',
             width: 1,
             fg,
             bg,
+            fg_source,
+            bg_source,
             // Erased cells retain BCE colors, not the formatting of the
             // glyph that was previously at this location.
             style: TextStyle::default(),
         }
     }
 
-    fn ink_colors(&self) -> (u32, u32) {
-        let bright_fg = if self.style.contains(TextStyle::BOLD) {
-            self.palette.ansi[..8]
-                .iter()
-                .position(|&color| color == self.fg)
-                .map(|index| self.palette.ansi[index + 8])
-                .unwrap_or(self.fg)
-        } else {
-            self.fg
+    fn ink_colors_with_sources(&self) -> (u32, u32, ColorSource, ColorSource) {
+        // st brightens ANSI colors 0..7 when Bold is active; preserving
+        // the palette index also makes later OSC 4 changes repaint correctly.
+        let foreground_source = match self.fg_source {
+            ColorSource::Indexed(index) if index < 8 && self.style.contains(TextStyle::BOLD) => {
+                ColorSource::Indexed(index + 8)
+            }
+            source => source,
         };
+        let foreground = self.palette.resolve(foreground_source, self.fg);
+        let background = self.palette.resolve(self.bg_source, self.bg);
         if self.style.contains(TextStyle::REVERSE) {
-            (self.bg, bright_fg)
+            (background, foreground, self.bg_source, foreground_source)
         } else {
-            (bright_fg, self.bg)
+            (foreground, background, foreground_source, self.bg_source)
         }
+    }
+
+    fn ink_colors(&self) -> (u32, u32) {
+        let (fg, bg, _, _) = self.ink_colors_with_sources();
+        (fg, bg)
     }
 
     fn empty_row(&self) -> Vec<Cell> {
@@ -547,12 +555,14 @@ impl Screen {
             row.copy_within(self.x..self.cols - count, self.x + count);
             row[self.x..self.x + count].fill(blank);
         }
-        let (fg, bg) = self.ink_colors();
+        let (fg, bg, fg_source, bg_source) = self.ink_colors_with_sources();
         self.grid[self.y][self.x] = Cell {
             ch,
             width: width as u8,
             fg,
             bg,
+            fg_source,
+            bg_source,
             style: self.style,
         };
         if width == 2 && self.x + 1 < self.cols {
@@ -561,6 +571,8 @@ impl Screen {
                 width: 0,
                 fg,
                 bg,
+                fg_source,
+                bg_source,
                 style: self.style,
             };
         }
@@ -674,20 +686,7 @@ impl Screen {
     }
 
     fn indexed_color(&self, index: u8) -> u32 {
-        match index {
-            0..=15 => self.palette.ansi[index as usize],
-            16..=231 => {
-                let i = index as u32 - 16;
-                let channel = |v: u32| if v == 0 { 0 } else { 55 + 40 * v };
-                (channel(i / 36) << 16)
-                    | (channel((i / 6) % 6) << 8)
-                    | channel(i % 6)
-            }
-            _ => {
-                let gray = 8 + 10 * (index as u32 - 232);
-                (gray << 16) | (gray << 8) | gray
-            }
-        }
+        self.palette.indexed(index)
     }
 
     fn set_alternate(&mut self, enable: bool) {
@@ -1052,12 +1051,14 @@ impl Perform for Screen {
             if action == b'8' {
                 // DECALN: fill the current screen with E, matching st's
                 // screen alignment test, without changing cursor/margins.
-                let (fg, bg) = self.ink_colors();
+                let (fg, bg, fg_source, bg_source) = self.ink_colors_with_sources();
                 let cell = Cell {
                     ch: 'E',
                     width: 1,
                     fg,
                     bg,
+                    fg_source,
+                    bg_source,
                     style: self.style,
                 };
                 for row in &mut self.grid {
