@@ -49,6 +49,10 @@ pub struct TerminalConfig {
 pub struct ClipboardConfig {
     pub enabled: bool,
     pub copy_on_select: bool,
+    /// Allow applications to replace the host clipboard via OSC 52.
+    /// Disabled by default; clipboard reads are never supported.
+    #[serde(default)]
+    pub osc52_write: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
