@@ -28,7 +28,11 @@ pub struct FontConfig {
     pub family: String,
     pub size: f32,
     pub fallback: Vec<String>,
+    #[serde(default = "default_ligatures")]
+    pub ligatures: bool,
 }
+
+fn default_ligatures() -> bool { true }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CursorConfig {
