@@ -32,6 +32,8 @@ term = "xterm-256color"
 [clipboard]
 enabled = true
 copy_on_select = false
+# OSC 52 overwrites the host clipboard; opt in for trusted shells only.
+osc52_write = false
 
 [colors]
 foreground = "#cdd6f4"

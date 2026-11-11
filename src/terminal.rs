@@ -3,7 +3,9 @@ use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Parser, Perform};
 
-use crate::{config::Colors, mouse::MouseTracking};
+use crate::{config::Colors, mouse::MouseTracking, osc};
+
+pub const DEFAULT_TITLE: &str = "rst — Rust Simple Terminal";
 
 /// Compact, per-cell SGR attributes. Like st's ATTR_* bitmask, these must
 /// travel with each glyph through scrollback, insert/delete, and alternate
@@ -39,12 +41,24 @@ impl TextStyle {
     }
 }
 
+/// Palette provenance lets OSC recolor existing cells without changing
+/// literal RGB cells, including saved alternate screens and scrollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorSource {
+    DefaultForeground,
+    DefaultBackground,
+    Indexed(u8),
+    Direct,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
     pub width: u8,
     pub fg: u32,
     pub bg: u32,
+    pub fg_source: ColorSource,
+    pub bg_source: ColorSource,
     pub style: TextStyle,
 }
 
@@ -55,6 +69,7 @@ pub struct Palette {
     pub cursor: u32,
     pub selection: u32,
     pub ansi: [u32; 16],
+    pub extended: [u32; 240],
 }
 
 impl TryFrom<&Colors> for Palette {
@@ -81,7 +96,44 @@ impl TryFrom<&Colors> for Palette {
             cursor: parse(&colors.cursor)?,
             selection: parse(&colors.selection)?,
             ansi: parsed.try_into().expect("length validated"),
+            extended: std::array::from_fn(|i| Palette::xterm_indexed((i + 16) as u8)),
         })
+    }
+}
+
+impl Palette {
+    fn xterm_indexed(index: u8) -> u32 {
+        match index {
+            16..=231 => {
+                let i = index as u32 - 16;
+                let channel = |v: u32| if v == 0 { 0 } else { 55 + 40 * v };
+                (channel(i / 36) << 16) | (channel((i / 6) % 6) << 8) | channel(i % 6)
+            }
+            232..=255 => {
+                let grey = 8 + 10 * (index as u32 - 232);
+                (grey << 16) | (grey << 8) | grey
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn indexed(&self, index: u8) -> u32 {
+        if index < 16 { self.ansi[index as usize] }
+        else { self.extended[index as usize - 16] }
+    }
+
+    fn set_indexed(&mut self, index: u8, rgb: u32) {
+        if index < 16 { self.ansi[index as usize] = rgb; }
+        else { self.extended[index as usize - 16] = rgb; }
+    }
+
+    fn resolve(&self, source: ColorSource, literal: u32) -> u32 {
+        match source {
+            ColorSource::DefaultForeground => self.foreground,
+            ColorSource::DefaultBackground => self.background,
+            ColorSource::Indexed(index) => self.indexed(index),
+            ColorSource::Direct => literal,
+        }
     }
 }
 
@@ -100,6 +152,8 @@ struct CursorSnapshot {
     wrap_pending: bool,
     fg: u32,
     bg: u32,
+    fg_source: ColorSource,
+    bg_source: ColorSource,
     style: TextStyle,
     origin_mode: bool,
 }
@@ -130,8 +184,15 @@ pub struct Screen {
     pub insert_mode: bool,
     pub newline_mode: bool,
     pub palette: Palette,
+    initial_palette: Palette,
+    pub title: String,
+    pub icon_title: String,
+    pub osc52_write_allowed: bool,
+    clipboard_writes: Vec<String>,
     fg: u32,
     bg: u32,
+    fg_source: ColorSource,
+    bg_source: ColorSource,
     style: TextStyle,
     history_limit: usize,
     scroll_top: usize,
@@ -153,6 +214,8 @@ impl Screen {
             width: 1,
             fg: palette.foreground,
             bg: palette.background,
+            fg_source: ColorSource::DefaultForeground,
+            bg_source: ColorSource::DefaultBackground,
             style: TextStyle::default(),
         };
         Self {
@@ -180,8 +243,15 @@ impl Screen {
             newline_mode: false,
             fg: palette.foreground,
             bg: palette.background,
+            fg_source: ColorSource::DefaultForeground,
+            bg_source: ColorSource::DefaultBackground,
             style: TextStyle::default(),
+            initial_palette: palette.clone(),
             palette,
+            title: DEFAULT_TITLE.to_string(),
+            icon_title: DEFAULT_TITLE.to_string(),
+            osc52_write_allowed: false,
+            clipboard_writes: Vec::new(),
             history_limit,
             scroll_top: 0,
             scroll_bottom: rows,
@@ -193,6 +263,8 @@ impl Screen {
                 wrap_pending: false,
                 fg: blank.fg,
                 bg: blank.bg,
+                fg_source: blank.fg_source,
+                bg_source: blank.bg_source,
                 style: TextStyle::default(),
                 origin_mode: false,
             },
@@ -209,6 +281,8 @@ impl Screen {
             wrap_pending: self.wrap_pending,
             fg: self.fg,
             bg: self.bg,
+            fg_source: self.fg_source,
+            bg_source: self.bg_source,
             style: self.style,
             origin_mode: self.origin_mode,
         }
@@ -227,8 +301,10 @@ impl Screen {
         self.origin_mode = saved.origin_mode;
         self.x = saved.x.min(self.cols - 1);
         self.y = saved.y.min(self.rows - 1);
-        self.fg = saved.fg;
-        self.bg = saved.bg;
+        self.fg = self.palette.resolve(saved.fg_source, saved.fg);
+        self.bg = self.palette.resolve(saved.bg_source, saved.bg);
+        self.fg_source = saved.fg_source;
+        self.bg_source = saved.bg_source;
         self.style = saved.style;
         self.wrap_pending = self.auto_wrap && saved.wrap_pending && self.x + 1 == self.cols;
     }
@@ -288,33 +364,41 @@ impl Screen {
     // background, not the initial palette background. tmux relies on this
     // for coloured status lines and clear-to-end-of-line sequences.
     fn blank(&self) -> Cell {
-        let (fg, bg) = self.ink_colors();
+        let (fg, bg, fg_source, bg_source) = self.ink_colors_with_sources();
         Cell {
             ch: ' ',
             width: 1,
             fg,
             bg,
+            fg_source,
+            bg_source,
             // Erased cells retain BCE colors, not the formatting of the
             // glyph that was previously at this location.
             style: TextStyle::default(),
         }
     }
 
-    fn ink_colors(&self) -> (u32, u32) {
-        let bright_fg = if self.style.contains(TextStyle::BOLD) {
-            self.palette.ansi[..8]
-                .iter()
-                .position(|&color| color == self.fg)
-                .map(|index| self.palette.ansi[index + 8])
-                .unwrap_or(self.fg)
-        } else {
-            self.fg
+    fn ink_colors_with_sources(&self) -> (u32, u32, ColorSource, ColorSource) {
+        // st brightens ANSI colors 0..7 when Bold is active; preserving
+        // the palette index also makes later OSC 4 changes repaint correctly.
+        let foreground_source = match self.fg_source {
+            ColorSource::Indexed(index) if index < 8 && self.style.contains(TextStyle::BOLD) => {
+                ColorSource::Indexed(index + 8)
+            }
+            source => source,
         };
+        let foreground = self.palette.resolve(foreground_source, self.fg);
+        let background = self.palette.resolve(self.bg_source, self.bg);
         if self.style.contains(TextStyle::REVERSE) {
-            (self.bg, bright_fg)
+            (background, foreground, self.bg_source, foreground_source)
         } else {
-            (bright_fg, self.bg)
+            (foreground, background, foreground_source, self.bg_source)
         }
+    }
+
+    fn ink_colors(&self) -> (u32, u32) {
+        let (fg, bg, _, _) = self.ink_colors_with_sources();
+        (fg, bg)
     }
 
     fn empty_row(&self) -> Vec<Cell> {
@@ -471,12 +555,14 @@ impl Screen {
             row.copy_within(self.x..self.cols - count, self.x + count);
             row[self.x..self.x + count].fill(blank);
         }
-        let (fg, bg) = self.ink_colors();
+        let (fg, bg, fg_source, bg_source) = self.ink_colors_with_sources();
         self.grid[self.y][self.x] = Cell {
             ch,
             width: width as u8,
             fg,
             bg,
+            fg_source,
+            bg_source,
             style: self.style,
         };
         if width == 2 && self.x + 1 < self.cols {
@@ -485,6 +571,8 @@ impl Screen {
                 width: 0,
                 fg,
                 bg,
+                fg_source,
+                bg_source,
                 style: self.style,
             };
         }
@@ -542,6 +630,8 @@ impl Screen {
                 0 => {
                     self.fg = self.palette.foreground;
                     self.bg = self.palette.background;
+                    self.fg_source = ColorSource::DefaultForeground;
+                    self.bg_source = ColorSource::DefaultBackground;
                     self.style = TextStyle::default();
                 }
                 1 => self.style.set(TextStyle::BOLD, true),
@@ -562,32 +652,58 @@ impl Screen {
                 27 => self.style.set(TextStyle::REVERSE, false),
                 28 => self.style.set(TextStyle::INVISIBLE, false),
                 29 => self.style.set(TextStyle::STRUCK, false),
-                30..=37 => self.fg = self.palette.ansi[(params[i] - 30) as usize],
-                40..=47 => self.bg = self.palette.ansi[(params[i] - 40) as usize],
-                90..=97 => self.fg = self.palette.ansi[(params[i] - 90 + 8) as usize],
-                100..=107 => self.bg = self.palette.ansi[(params[i] - 100 + 8) as usize],
-                39 => self.fg = self.palette.foreground,
-                49 => self.bg = self.palette.background,
+                30..=37 => {
+                    let index = (params[i] - 30) as u8;
+                    self.fg_source = ColorSource::Indexed(index);
+                    self.fg = self.indexed_color(index);
+                },
+                40..=47 => {
+                    let index = (params[i] - 40) as u8;
+                    self.bg_source = ColorSource::Indexed(index);
+                    self.bg = self.indexed_color(index);
+                },
+                90..=97 => {
+                    let index = (params[i] - 90 + 8) as u8;
+                    self.fg_source = ColorSource::Indexed(index);
+                    self.fg = self.indexed_color(index);
+                },
+                100..=107 => {
+                    let index = (params[i] - 100 + 8) as u8;
+                    self.bg_source = ColorSource::Indexed(index);
+                    self.bg = self.indexed_color(index);
+                },
+                39 => {
+                    self.fg = self.palette.foreground;
+                    self.fg_source = ColorSource::DefaultForeground;
+                },
+                49 => {
+                    self.bg = self.palette.background;
+                    self.bg_source = ColorSource::DefaultBackground;
+                },
                 38 | 48 => {
                     let is_fg = params[i] == 38;
                     let value = if params.get(i + 1) == Some(&2) && i + 4 < params.len() {
                         i += 4;
-                        Some(
+                        Some((
                             ((params[i - 2].min(255) as u32) << 16)
                                 | ((params[i - 1].min(255) as u32) << 8)
                                 | params[i].min(255) as u32,
-                        )
+                            ColorSource::Direct,
+                        ))
                     } else if params.get(i + 1) == Some(&5) && i + 2 < params.len() {
                         i += 2;
-                        Some(self.indexed_color(params[i] as u8))
+                        let index = params[i].min(255) as u8;
+                        Some((self.indexed_color(index), ColorSource::Indexed(index)))
                     } else {
                         None
                     };
-                    if let Some(color) = value {
+                    if let Some((color, source)) = value {
                         if is_fg {
                             self.fg = color;
+                            self.fg_source = source;
                         } else {
                             self.bg = color;
+                            self.bg_source = source;
                         }
                     }
                 }
@@ -598,19 +714,36 @@ impl Screen {
     }
 
     fn indexed_color(&self, index: u8) -> u32 {
-        match index {
-            0..=15 => self.palette.ansi[index as usize],
-            16..=231 => {
-                let i = index as u32 - 16;
-                let channel = |v: u32| if v == 0 { 0 } else { 55 + 40 * v };
-                (channel(i / 36) << 16)
-                    | (channel((i / 6) % 6) << 8)
-                    | channel(i % 6)
+        self.palette.indexed(index)
+    }
+
+    /// Re-evaluate only palette-based cells after OSC color changes. Direct
+    /// RGB colors and decorations are unaffected. Keep saved screens/history
+    /// consistent so switching alternate screen cannot resurrect stale colors.
+    fn refresh_palette(&mut self) {
+        fn refresh_cell(cell: &mut Cell, palette: &Palette) {
+            cell.fg = palette.resolve(cell.fg_source, cell.fg);
+            cell.bg = palette.resolve(cell.bg_source, cell.bg);
+        }
+        let palette = &self.palette;
+        for row in &mut self.grid {
+            for cell in row { refresh_cell(cell, palette); }
+        }
+        for row in &mut self.history {
+            for cell in row { refresh_cell(cell, palette); }
+        }
+        if let Some(saved) = self.alternate.as_mut() {
+            for row in &mut saved.grid {
+                for cell in row { refresh_cell(cell, palette); }
             }
-            _ => {
-                let gray = 8 + 10 * (index as u32 - 232);
-                (gray << 16) | (gray << 8) | gray
-            }
+        }
+        self.fg = palette.resolve(self.fg_source, self.fg);
+        self.bg = palette.resolve(self.bg_source, self.bg);
+        self.saved_cursor.fg = palette.resolve(self.saved_cursor.fg_source, self.saved_cursor.fg);
+        self.saved_cursor.bg = palette.resolve(self.saved_cursor.bg_source, self.saved_cursor.bg);
+        if let Some(saved) = &mut self.saved_primary_cursor {
+            saved.fg = palette.resolve(saved.fg_source, saved.fg);
+            saved.bg = palette.resolve(saved.bg_source, saved.bg);
         }
     }
 
@@ -635,6 +768,119 @@ impl Screen {
                 self.wrap_pending = saved.wrap_pending;
                 self.view_offset = 0;
             }
+        }
+    }
+
+    /// Drain trusted clipboard-write requests at the UI boundary, where
+    /// native clipboard access is available. Never expose clipboard reads.
+    pub fn take_clipboard_writes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.clipboard_writes)
+    }
+
+    fn set_osc_color(&mut self, code: u16, value: u32) {
+        match code {
+            10 => self.palette.foreground = value,
+            11 => self.palette.background = value,
+            12 => self.palette.cursor = value,
+            _ => return,
+        }
+        self.refresh_palette();
+    }
+
+    fn reset_osc_color(&mut self, code: u16) {
+        let value = match code {
+            110 => self.initial_palette.foreground,
+            111 => self.initial_palette.background,
+            112 => self.initial_palette.cursor,
+            _ => return,
+        };
+        self.set_osc_color(code - 100, value);
+    }
+
+    fn handle_osc(&mut self, params: &[&[u8]]) {
+        let Some(code) = params.first().and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|p| p.parse::<u16>().ok()) else {
+            return;
+        };
+        match code {
+            0 | 1 | 2 => {
+                if params.len() < 2 {
+                    return;
+                }
+                // OSC titles may themselves contain semicolons; vte splits
+                // those into arguments, so restore them before validation.
+                let mut value = Vec::new();
+                for (i, part) in params[1..].iter().enumerate() {
+                    if i != 0 { value.push(b';'); }
+                    if value.len().saturating_add(part.len()) > 4096 {
+                        return;
+                    }
+                    value.extend_from_slice(part);
+                }
+                if let Some(title) = osc::title(&value) {
+                    let title = if title.is_empty() { DEFAULT_TITLE.to_string() } else { title };
+                    if code == 0 || code == 2 { self.title = title.clone(); }
+                    if code == 0 || code == 1 { self.icon_title = title; }
+                }
+            }
+            4 => {
+                // OSC 4 accepts multiple index;spec pairs in one string.
+                let mut updated = false;
+                for pair in params[1..].chunks_exact(2) {
+                    let Some(index) = std::str::from_utf8(pair[0]).ok()
+                        .and_then(|v| v.parse::<u8>().ok()) else { continue };
+                    if pair[1] == b"?" {
+                        self.replies.extend(osc::color_reply(4, Some(index), self.palette.indexed(index)));
+                    } else if let Some(color) = osc::parse_color(pair[1]) {
+                        self.palette.set_indexed(index, color);
+                        updated = true;
+                    }
+                }
+                if updated { self.refresh_palette(); }
+            }
+            10 | 11 | 12 => {
+                let Some(arg) = params.get(1) else { return };
+                if *arg == b"?" {
+                    let color = match code {
+                        10 => self.palette.foreground,
+                        11 => self.palette.background,
+                        _ => self.palette.cursor,
+                    };
+                    self.replies.extend(osc::color_reply(code, None, color));
+                } else if let Some(color) = osc::parse_color(arg) {
+                    self.set_osc_color(code, color);
+                }
+            }
+            52 => {
+                if self.osc52_write_allowed && self.clipboard_writes.len() < 8 {
+                    if let (Some(selection), Some(payload)) = (params.get(1), params.get(2)) {
+                        if let Some(text) = osc::clipboard_write(selection, payload) {
+                            self.clipboard_writes.push(text);
+                        }
+                    }
+                }
+            }
+            104 => {
+                // Without indices, OSC 104 resets the complete 256-color
+                // palette to the configured initial values.
+                if params.len() == 1 || params[1..].iter().all(|p| p.is_empty()) {
+                    self.palette.ansi = self.initial_palette.ansi;
+                    self.palette.extended = self.initial_palette.extended;
+                    self.refresh_palette();
+                } else {
+                    let mut updated = false;
+                    for arg in &params[1..] {
+                        if let Some(index) = std::str::from_utf8(arg).ok()
+                            .and_then(|v| v.parse::<u8>().ok()) {
+                            self.palette.set_indexed(index, self.initial_palette.indexed(index));
+                            updated = true;
+                        }
+                    }
+                    if updated { self.refresh_palette(); }
+                }
+            }
+            110..=112 => self.reset_osc_color(code),
+            _ => {} // Never run unknown OSC commands or window operations.
         }
     }
 
@@ -727,6 +973,8 @@ impl Screen {
         self.style = TextStyle::default();
         self.fg = self.palette.foreground;
         self.bg = self.palette.background;
+        self.fg_source = ColorSource::DefaultForeground;
+        self.bg_source = ColorSource::DefaultBackground;
         self.scroll_top = 0;
         self.scroll_bottom = self.rows;
         self.wrap_pending = false;
@@ -804,6 +1052,10 @@ impl Screen {
 }
 
 impl Perform for Screen {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.handle_osc(params);
+    }
+
     fn print(&mut self, c: char) {
         self.put_char(c);
     }
@@ -976,12 +1228,14 @@ impl Perform for Screen {
             if action == b'8' {
                 // DECALN: fill the current screen with E, matching st's
                 // screen alignment test, without changing cursor/margins.
-                let (fg, bg) = self.ink_colors();
+                let (fg, bg, fg_source, bg_source) = self.ink_colors_with_sources();
                 let cell = Cell {
                     ch: 'E',
                     width: 1,
                     fg,
                     bg,
+                    fg_source,
+                    bg_source,
                     style: self.style,
                 };
                 for row in &mut self.grid {
@@ -1019,8 +1273,10 @@ impl Perform for Screen {
                 let cols = self.cols;
                 let rows = self.rows;
                 let limit = self.history_limit;
-                let palette = self.palette.clone();
+                let palette = self.initial_palette.clone();
+                let osc52_allowed = self.osc52_write_allowed;
                 *self = Self::new(cols, rows, limit, palette);
+                self.osc52_write_allowed = osc52_allowed;
             }
             _ => {}
         }
@@ -1048,6 +1304,10 @@ impl Terminal {
 #[cfg(test)]
 #[path = "vt_modes_tests.rs"]
 mod vt_modes_tests;
+
+#[cfg(test)]
+#[path = "osc_tests.rs"]
+mod osc_tests;
 
 #[cfg(test)]
 mod tests {

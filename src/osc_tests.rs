@@ -1,0 +1,158 @@
+//! OSC regression vectors parsed through the real vte byte-stream parser.
+use super::*;
+
+fn terminal() -> Terminal {
+    let config: crate::config::Config =
+        toml::from_str(include_str!("../config/default.toml")).unwrap();
+    Terminal::new(8, 3, 20, Palette::try_from(&config.colors).unwrap())
+}
+
+#[test]
+fn title_and_icon_title_follow_osc_0_1_2_and_both_terminators() {
+    let mut t = terminal();
+    assert_eq!(t.screen.title, DEFAULT_TITLE);
+    t.advance(b"\x1b]0;Hello terminal\x07");
+    assert_eq!(t.screen.title, "Hello terminal");
+    assert_eq!(t.screen.icon_title, "Hello terminal");
+    t.advance(" \x1b]2;Neovim 🦀\x1b\\".as_bytes());
+    assert_eq!(t.screen.title, "Neovim 🦀");
+    assert_eq!(t.screen.icon_title, "Hello terminal");
+    t.advance(b"\x1b]1;Icon only\x07");
+    assert_eq!(t.screen.icon_title, "Icon only");
+    assert_eq!(t.screen.title, "Neovim 🦀");
+    t.advance(b"\x1b]2;\x07");
+    assert_eq!(t.screen.title, DEFAULT_TITLE);
+    assert_eq!(t.screen.icon_title, "Icon only");
+}
+
+#[test]
+fn osc_title_works_when_split_across_multiple_reads() {
+    let mut t = terminal();
+    t.advance(b"\x1b]2;Hello");
+    assert_eq!(t.screen.title, DEFAULT_TITLE);
+    t.advance(b"; world\x1b");
+    assert_eq!(t.screen.title, DEFAULT_TITLE);
+    t.advance(b"\\");
+    assert_eq!(t.screen.title, "Hello; world");
+}
+
+#[test]
+fn osc_4_recolors_existing_palette_cells_not_truecolor() {
+    let mut t = terminal();
+    let original = t.screen.palette.ansi[1];
+    t.advance(b"\x1b[31mA\x1b[38;2;1;2;3mB\x1b[0m");
+    assert_eq!(t.screen.grid[0][0].fg, original);
+    assert_eq!(t.screen.grid[0][1].fg, 0x010203);
+    t.advance(b"\x1b]4;1;#ff3300\x07");
+    assert_eq!(t.screen.palette.indexed(1), 0xff3300);
+    assert_eq!(t.screen.grid[0][0].fg, 0xff3300);
+    assert_eq!(t.screen.grid[0][1].fg, 0x010203);
+    t.advance(b"\x1b]4;1;?\x07");
+    assert_eq!(t.screen.take_replies(), b"\x1b]4;1;rgb:ffff/3333/0000\x07");
+    t.advance(b"\x1b]104;1\x1b\\");
+    assert_eq!(t.screen.palette.indexed(1), original);
+    assert_eq!(t.screen.grid[0][0].fg, original);
+}
+
+#[test]
+fn osc_4_supports_256_color_indices_multiple_pairs_and_full_reset() {
+    let mut t = terminal();
+    let original_196 = t.screen.palette.indexed(196);
+    t.advance(b"\x1b[38;5;196mX\x1b[0m");
+    assert_eq!(t.screen.grid[0][0].fg, original_196);
+    t.advance(b"\x1b]4;196;#112233;3;#00ff99\x1b\\");
+    assert_eq!(t.screen.grid[0][0].fg, 0x112233);
+    assert_eq!(t.screen.palette.indexed(3), 0x00ff99);
+    t.advance(b"\x1b]4;196;?\x07");
+    assert_eq!(t.screen.take_replies(), b"\x1b]4;196;rgb:1111/2222/3333\x07");
+    t.advance(b"\x1b]104\x07");
+    assert_eq!(t.screen.grid[0][0].fg, original_196);
+    assert_eq!(t.screen.palette.indexed(3), t.screen.initial_palette.indexed(3));
+}
+
+#[test]
+fn osc_10_11_12_queries_and_individual_resets() {
+    let mut t = terminal();
+    let base_fg = t.screen.palette.foreground;
+    let base_bg = t.screen.palette.background;
+    let base_cursor = t.screen.palette.cursor;
+    t.advance(b"A\x1b]10;#123456\x07\x1b]11;rgb:0/f/0\x07\x1b]12;#abcdef\x07");
+    assert_eq!(t.screen.palette.foreground, 0x123456);
+    assert_eq!(t.screen.palette.background, 0x00ff00);
+    assert_eq!(t.screen.palette.cursor, 0xabcdef);
+    assert_eq!(t.screen.grid[0][0].fg, 0x123456);
+    assert_eq!(t.screen.grid[0][0].bg, 0x00ff00);
+    t.advance(b"\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07");
+    assert_eq!(t.screen.take_replies(), [
+        b"\x1b]10;rgb:1212/3434/5656\x07".as_slice(),
+        b"\x1b]11;rgb:0000/ffff/0000\x07",
+        b"\x1b]12;rgb:abab/cdcd/efef\x07",
+    ].concat());
+    t.advance(b"\x1b]110\x07\x1b]111\x07\x1b]112\x07");
+    assert_eq!(t.screen.palette.foreground, base_fg);
+    assert_eq!(t.screen.palette.background, base_bg);
+    assert_eq!(t.screen.palette.cursor, base_cursor);
+    assert_eq!(t.screen.grid[0][0].fg, base_fg);
+    assert_eq!(t.screen.grid[0][0].bg, base_bg);
+}
+
+#[test]
+fn osc_palette_refreshes_history_and_saved_alternate_screen() {
+    let mut t = terminal();
+    t.advance(b"\x1b[31mA\r\nB\r\nC\r\nD");
+    assert_eq!(t.screen.history[0][0].ch, 'A');
+    t.advance(b"\x1b[?1049h\x1b[31mZ");
+    t.advance(b"\x1b]4;1;#abcdef\x07");
+    assert_eq!(t.screen.grid[0][0].fg, 0xabcdef);
+    assert_eq!(t.screen.history[0][0].fg, 0xabcdef);
+    t.advance(b"\x1b[?1049l");
+    assert_eq!(t.screen.grid[0][0].fg, 0xabcdef); // saved primary
+}
+
+#[test]
+fn invalid_osc_colors_and_unknown_commands_do_not_mutate_state() {
+    let mut t = terminal();
+    let original = t.screen.palette.indexed(1);
+    t.advance(b"\x1b]4;1;bad;600;#ffffff\x07");
+    t.advance(b"\x1b]4;1;?\x07");
+    assert_eq!(t.screen.palette.indexed(1), original);
+    assert!(!t.screen.take_replies().is_empty());
+    t.advance(b"\x1b]9999;arbitrary\x07");
+    assert_eq!(t.screen.palette.indexed(1), original);
+}
+
+#[test]
+fn osc_52_is_default_deny_and_read_queries_never_leak_clipboard() {
+    let mut t = terminal();
+    t.advance(b"\x1b]52;c;aGVsbG8=\x07");
+    assert!(t.screen.take_clipboard_writes().is_empty());
+    t.screen.osc52_write_allowed = true;
+    t.advance(b"\x1b]52;c;?\x07");
+    assert!(t.screen.take_clipboard_writes().is_empty());
+    assert!(t.screen.take_replies().is_empty());
+    t.advance(b"\x1b]52;c;aGVsbG8=\x1b\\");
+    assert_eq!(t.screen.take_clipboard_writes(), vec!["hello".to_string()]);
+    t.advance(b"\x1b]52;c;bad!base64\x07");
+    assert!(t.screen.take_clipboard_writes().is_empty());
+}
+
+#[test]
+fn ris_resets_palette_and_title_but_preserves_osc52_permission() {
+    let mut t = terminal();
+    t.screen.osc52_write_allowed = true;
+    let original = t.screen.palette.ansi[2];
+    t.advance(b"\x1b]2;custom\x07\x1b]4;2;#112233\x07");
+    t.advance(b"\x1bc");
+    assert_eq!(t.screen.title, DEFAULT_TITLE);
+    assert_eq!(t.screen.palette.ansi[2], original);
+    assert!(t.screen.osc52_write_allowed);
+    t.advance(b"\x1b]52;c;aGVsbG8=\x07");
+    assert_eq!(t.screen.take_clipboard_writes(), vec!["hello".to_string()]);
+}
+
+#[test]
+fn saved_cursor_palette_references_update_after_color_change() {
+    let mut t = terminal();
+    t.advance(b"\x1b[31m\x1b7\x1b[0m\x1b]4;1;#fedcba\x07\x1b8Q");
+    assert_eq!(t.screen.grid[0][0].fg, 0xfedcba);
+}
