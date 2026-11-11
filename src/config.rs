@@ -12,6 +12,8 @@ pub struct Config {
     pub terminal: TerminalConfig,
     pub clipboard: ClipboardConfig,
     #[serde(default)]
+    pub command_output: CommandOutputConfig,
+    #[serde(default)]
     pub bell: BellConfig,
     pub colors: Colors,
 }
@@ -59,6 +61,17 @@ pub struct ClipboardConfig {
     /// Disabled by default; clipboard reads are never supported.
     #[serde(default)]
     pub osc52_write: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct CommandOutputConfig {
+    /// Bound each active/completed OSC 133 output capture independently.
+    pub max_megabytes: usize,
+}
+
+impl Default for CommandOutputConfig {
+    fn default() -> Self { Self { max_megabytes: 32 } }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -137,6 +150,8 @@ pub fn load() -> Result<Config> {
     anyhow::ensure!(config.window.columns > 0 && config.window.rows > 0, "window size must be positive");
     anyhow::ensure!(config.font.size >= 6.0 && config.font.size <= 72.0, "font size must be 6..72");
     anyhow::ensure!(config.window.padding <= 128, "padding must be <= 128");
+    anyhow::ensure!((1..=128).contains(&config.command_output.max_megabytes),
+        "command_output.max_megabytes must be 1..128");
     anyhow::ensure!(supported_cursor_style(&config.cursor.style), "cursor.style must be block, underline, or bar");
     anyhow::ensure!((100..=3000).contains(&config.cursor.blink_interval_ms), "cursor.blink_interval_ms must be 100..3000");
     Ok(config)
@@ -145,6 +160,14 @@ pub fn load() -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_output_capture_limit_is_backward_compatible() {
+        let base: Config = toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert_eq!(base.command_output.max_megabytes, 32);
+        let legacy: CommandOutputConfig = toml::from_str("").unwrap();
+        assert_eq!(legacy.max_megabytes, 32);
+    }
 
     #[test]
     fn bell_defaults_and_backward_compatibility() {
