@@ -54,7 +54,7 @@ fn rectangle_drag_forward_backward_highlights_only_columns_in_each_row() {
     let mut sel = Selection::new(&t.screen, (3, 2), SelectionSnap::Character, true);
     sel.update(&t.screen, (1, 0), true);
     assert_eq!(sel.kind, SelectionKind::Rectangular);
-    assert_eq!(sel.text(&t.screen), "bc\nwx\n23");
+    assert_eq!(sel.text(&t.screen), "bcd\nwxy\n234");
     assert!(sel.contains(&t.screen, 1, 2));
     assert!(sel.contains(&t.screen, 3, 0));
     assert!(!sel.contains(&t.screen, 0, 1));
