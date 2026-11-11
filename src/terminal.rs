@@ -1545,6 +1545,10 @@ mod grapheme_tests;
 mod command_capture_tests;
 
 #[cfg(test)]
+#[path = "copy_feedback_tests.rs"]
+mod copy_feedback_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
