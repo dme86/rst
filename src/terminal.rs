@@ -995,7 +995,12 @@ impl Screen {
                 }
                 if let Some(title) = osc::title(&value) {
                     let title = if title.is_empty() { DEFAULT_TITLE.to_string() } else { title };
-                    if code == 0 || code == 2 { self.title = title.clone(); }
+                    if code == 0 || code == 2 {
+                        if self.title != title {
+                            self.title = title.clone();
+                            self.tab_label_revision = self.tab_label_revision.wrapping_add(1);
+                        }
+                    }
                     if code == 0 || code == 1 { self.icon_title = title; }
                 }
             }
