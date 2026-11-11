@@ -146,6 +146,42 @@ switches do not discard the designation. DECSTR and RIS restore ASCII.
 Regression tests: `src/charset.rs` and `src/charset_tests.rs`. Like
 upstream `st`, unsupported national/legacy charset designations are ignored.
 
+### Focus reporting and terminal bell
+
+- `DECSET 1004` (`CSI ? 1004 h/l`) enables/disables xterm/st focus
+  reporting. On a real focus transition, rst sends `CSI I` (focused) or
+  `CSI O` (unfocused) to the PTY. Duplicate window focus notifications
+  are suppressed; focus state is tracked even when the mode is disabled.
+- `BEL` (ASCII `0x07`, `printf '\a'`) plays a native system alert and
+  briefly highlights a two-pixel border in the configured cursor color.
+  The 150 ms rate limit prevents bell floods from overwhelming sound or
+  launching excessive processes. BEL that merely terminates an OSC
+  sequence does not ring.
+- Like st, an unfocused window requests user attention. On macOS this
+  can bounce the Dock icon; Wayland attention depends on compositor
+  support for `xdg_activation_v1`.
+
+Configure bell behavior in `~/.config/rst/config.toml`:
+
+```toml
+[bell]
+enabled = true  # Master BEL switch
+audible = true  # macOS system beep or libcanberra on Linux
+visual = true   # Brief border flash; works without audio packages
+```
+
+On macOS the sound uses AppKit `NSBeep()` and respects the system alert
+sound. On Linux/Wayland, the optional `canberra-gtk-play` utility plays
+the freedesktop `bell-terminal` sound event. Install the libcanberra
+player and a sound theme if you want audible bells; the visual alert
+still works without them. There is no shell invocation.
+
+To check focus events, run `printf '\033[?1004h'` followed by `cat -v`,
+switch to another app and back, and look for `^[[O` / `^[[I`. After
+interrupting `cat`, run `printf '\033[?1004l'`. Protocol and blink
+lifecycle tests are in `src/attention.rs`, `src/attention_tests.rs`
+and `src/render.rs`.
+
 ### SGR text attributes (st compatibility)
 
 rst now stores SGR styling **per terminal cell** (including scrollback and
