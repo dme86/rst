@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::{
     config::FontConfig,
     ime::{self, Preedit},
+    shaping::{self, FontBytes, ShapedText},
     terminal::{Cell, CursorShape, Screen, TextStyle},
     selection::Selection,
 };
@@ -21,12 +22,27 @@ struct Glyph {
 /// Pick a real bold/italic font face when the installed family provides it.
 /// If a family has no such face, the draw stage synthesizes the missing
 /// attribute rather than silently rendering a regular glyph.
+fn load_font_face(db: &Database, id: fontdb::ID) -> Option<(Font, FontBytes)> {
+    db.with_face_data(id, |data, index| {
+        let font = Font::from_bytes(
+            data.to_vec(),
+            FontSettings {
+                collection_index: index,
+                ..FontSettings::default()
+            },
+        ).ok()?;
+        Some((font, FontBytes { bytes: data.to_vec(), face_index: index }))
+    }).flatten()
+}
+
+/// Resolve real bold/italic faces *and their original bytes*. Rustybuzz and
+/// fontdue must use the same file/collection index for glyph IDs to agree.
 fn load_style_face(
     db: &Database,
     families: &[Family<'_>],
     bold: bool,
     italic: bool,
-) -> Option<Font> {
+) -> Option<(Font, FontBytes)> {
     let query = Query {
         families,
         weight: if bold { Weight::BOLD } else { Weight::NORMAL },
@@ -41,24 +57,19 @@ fn load_style_face(
     if italic && face.style == Style::Normal {
         return None;
     }
-    db.with_face_data(id, |data, index| {
-        Font::from_bytes(
-            data.to_vec(),
-            FontSettings {
-                collection_index: index,
-                ..FontSettings::default()
-            },
-        )
-        .ok()
-    })
-    .flatten()
+    load_font_face(db, id)
 }
 
 pub struct Renderer {
     fonts: Vec<Font>,
+    font_sources: Vec<FontBytes>,
     // For each regular fallback face: bold, italic, bold-italic variants.
     styled_fonts: Vec<[Option<Font>; 3]>,
+    styled_sources: Vec<[Option<FontBytes>; 3]>,
     glyphs: HashMap<(usize, u8, char), Glyph>,
+    indexed_glyphs: HashMap<(usize, u8, u16), Glyph>,
+    shape_cache: HashMap<(usize, u8, bool, String), ShapedText>,
+    ligatures: bool,
     // Only used when RST_DEBUG_FONTS=1 to avoid repeatedly reporting a codepoint.
     missing_glyphs: HashSet<char>,
     debug_fonts: bool,
@@ -76,7 +87,9 @@ impl Renderer {
         let mut db = Database::new();
         db.load_system_fonts();
         let mut fonts = Vec::new();
+        let mut font_sources = Vec::new();
         let mut styled_fonts = Vec::new();
+        let mut styled_sources = Vec::new();
         let mut loaded = Vec::new();
         let mut seen = HashSet::new();
         let debug_fonts = std::env::var_os("RST_DEBUG_FONTS").is_some();
@@ -89,26 +102,21 @@ impl Renderer {
                 families: &[Family::Name(family)],
                 ..Query::default()
             };
-            if let Some(font) = db.query(&query).and_then(|id| {
-                db.with_face_data(id, |data, index| {
-                    Font::from_bytes(
-                        data.to_vec(),
-                        FontSettings {
-                            collection_index: index,
-                            ..FontSettings::default()
-                        },
-                    )
-                    .ok()
-                })
-                .flatten()
-            }) {
+            if let Some((font, source)) = db.query(&query)
+                .and_then(|id| load_font_face(&db, id))
+            {
                 let family_query = [Family::Name(family)];
-                styled_fonts.push([
+                let variants = [
                     load_style_face(&db, &family_query, true, false),
                     load_style_face(&db, &family_query, false, true),
                     load_style_face(&db, &family_query, true, true),
-                ]);
+                ];
+                styled_sources.push(std::array::from_fn(|i| {
+                    variants[i].as_ref().map(|(_, bytes)| bytes.clone())
+                }));
+                styled_fonts.push(variants.map(|value| value.map(|(font, _)| font)));
                 fonts.push(font);
+                font_sources.push(source);
                 loaded.push(family.to_string());
             } else if debug_fonts {
                 eprintln!("rst: font family not available: {family}");
@@ -121,26 +129,21 @@ impl Renderer {
                 families: &[Family::Monospace],
                 ..Query::default()
             };
-            if let Some(font) = db.query(&query).and_then(|id| {
-                db.with_face_data(id, |data, index| {
-                    Font::from_bytes(
-                        data.to_vec(),
-                        FontSettings {
-                            collection_index: index,
-                            ..FontSettings::default()
-                        },
-                    )
-                    .ok()
-                })
-                .flatten()
-            }) {
+            if let Some((font, source)) = db.query(&query)
+                .and_then(|id| load_font_face(&db, id))
+            {
                 let family_query = [Family::Monospace];
-                styled_fonts.push([
+                let variants = [
                     load_style_face(&db, &family_query, true, false),
                     load_style_face(&db, &family_query, false, true),
                     load_style_face(&db, &family_query, true, true),
-                ]);
+                ];
+                styled_sources.push(std::array::from_fn(|i| {
+                    variants[i].as_ref().map(|(_, bytes)| bytes.clone())
+                }));
+                styled_fonts.push(variants.map(|value| value.map(|(font, _)| font)));
                 fonts.push(font);
+                font_sources.push(source);
                 loaded.push("system monospace".to_string());
             }
         }
@@ -158,8 +161,13 @@ impl Renderer {
 
         Ok(Self {
             fonts,
+            font_sources,
             styled_fonts,
+            styled_sources,
             glyphs: HashMap::new(),
+            indexed_glyphs: HashMap::new(),
+            shape_cache: HashMap::new(),
+            ligatures: config.ligatures,
             missing_glyphs: HashSet::new(),
             debug_fonts,
             font_size,
@@ -190,6 +198,8 @@ impl Renderer {
         // Previously rasterized pixels belong to a different font size.
         // Keep parsed font faces and fallback order; only discard bitmaps.
         self.glyphs.clear();
+        self.indexed_glyphs.clear();
+        self.shape_cache.clear();
     }
 
     /// Returns bitmap plus whether bold / italic should be synthesized.
