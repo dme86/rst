@@ -167,7 +167,10 @@ unread = "#b8bb26"
 
 **Smart tab names:** With `name_mode = "smart"`, a running command
 appears by its executable name (for example `k9s`, `nvim`, `htop`).
-Once it exits, the tab shows the working directory. Paths under your home
+When an executable hint is unavailable, rst also uses a running
+application's OSC window title (for example fish's `k9s ~` title is
+displayed as `k9s`). Once the command exits, the tab shows the working
+directory. Paths under your home
 folder are shortened to `~`; if the path is too long for the tab, rst shows
 its final folder name instead. If no metadata is available, it falls back
 to the normal OSC window title and finally the shell name.
