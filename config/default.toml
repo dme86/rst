@@ -19,6 +19,7 @@ fallback = [
 ]
 
 [cursor]
+# Cursor shape: block, underline, or bar. DECSCUSR can override it.
 style = "block"
 blink = true
 blink_interval_ms = 700
