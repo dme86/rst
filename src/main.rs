@@ -18,6 +18,7 @@ mod shaping;
 mod terminal;
 mod url_picker;
 mod tabs;
+mod tab_naming;
 
 use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};
 
@@ -69,6 +70,7 @@ struct App {
     inactive_tabs: Vec<StoredTab>,
     proxy: EventLoopProxy<UserEvent>,
     shell_label: String,
+    home_dir: Option<String>,
     context: Context<OwnedDisplayHandle>,
     window: Option<Arc<Window>>,
     surface: Option<Surface<OwnedDisplayHandle, Arc<Window>>>,
@@ -98,21 +100,29 @@ impl App {
     }
 
     fn tab_displays(&self) -> Vec<tabs::TabDisplay> {
+        let max_chars = tab_naming::label_columns(
+            tabs::TAB_COLUMNS, self.config.tabs.close_buttons,
+        );
         self.tab_order.iter().map(|id| {
-            let (title, unread) = if *id == self.active_tab_id {
-                (&self.terminal.screen.title, false)
+            let (screen, unread) = if *id == self.active_tab_id {
+                (&self.terminal.screen, false)
             } else {
                 let tab = self.inactive_tabs.iter().find(|tab| tab.id == *id)
                     .expect("all inactive IDs remain stored");
-                (&tab.terminal.screen.title, tab.unread)
+                (&tab.terminal.screen, tab.unread)
             };
-            let display = if title == terminal::DEFAULT_TITLE || title.is_empty() {
-                self.shell_label.clone()
-            } else {
-                title.chars().take(50).collect()
-            };
+            let title = tab_naming::label(
+                screen.cwd.as_deref(),
+                screen.foreground_program.as_deref(),
+                &screen.title,
+                screen.command_capture.running(),
+                &self.shell_label,
+                &self.config.tabs.name_mode,
+                self.home_dir.as_deref(),
+                max_chars,
+            );
             tabs::TabDisplay {
-                title: display,
+                title,
                 active: *id == self.active_tab_id,
                 unread,
             }
@@ -1356,7 +1366,14 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(tab) = self.inactive_tabs.iter_mut()
                         .find(|tab| tab.id == tab_id)
                     {
+                        let old_revision = tab.terminal.screen.tab_label_revision;
+                        let old_title = tab.terminal.screen.title.clone();
                         tab.terminal.advance(&bytes);
+                        if tab.terminal.screen.tab_label_revision != old_revision
+                            || tab.terminal.screen.title != old_title
+                        {
+                            became_unread = true; // Refresh tab label on metadata changes.
+                        }
                         let replies = tab.terminal.screen.take_replies();
                         if !replies.is_empty() { tab.pty.write(&replies); }
                         // Do not allow a hidden tab to steal the clipboard
@@ -1505,6 +1522,7 @@ fn main() -> Result<()> {
         proxy,
         shell_label: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
             .rsplit('/').next().unwrap_or("sh").to_string(),
+        home_dir: std::env::var("HOME").ok(),
         context,
         window: None,
         surface: None,
