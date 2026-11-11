@@ -4,6 +4,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+
+use crate::process_name;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use winit::event_loop::EventLoopProxy;
 
@@ -17,6 +19,8 @@ pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
+    shell_name: String,
+    foreground_name: Option<String>,
 }
 
 impl PtySession {
@@ -36,6 +40,9 @@ impl PtySession {
         })?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let shell_name = std::path::Path::new(&shell)
+            .file_name().and_then(|part| part.to_str()).unwrap_or("sh")
+            .to_owned();
         let mut command = CommandBuilder::new(&shell);
         command.env("TERM", term);
         command.env("COLORTERM", "truecolor");
@@ -76,7 +83,33 @@ impl PtySession {
             master: pair.master,
             writer,
             _child: child,
+            shell_name,
+            foreground_name: None,
         })
+    }
+
+    /// Probe the exact PTY foreground process group, rather than guessing
+    /// from the command typed by the user. This is called at a bounded
+    /// interval by the GUI event loop only while an application is running.
+    /// Returns true only when the displayed executable name has changed.
+    pub fn refresh_foreground_name(&mut self) -> bool {
+        let next = self.master.process_group_leader()
+            .and_then(process_name::executable_name)
+            .filter(|name| name != &self.shell_name);
+        if next == self.foreground_name {
+            return false;
+        }
+        self.foreground_name = next;
+        true
+    }
+
+    /// Clear a stale cached executable when the shell returns to its prompt.
+    pub fn clear_foreground_name(&mut self) -> bool {
+        self.foreground_name.take().is_some()
+    }
+
+    pub fn foreground_name(&self) -> Option<&str> {
+        self.foreground_name.as_deref()
     }
 
     pub fn terminate(&mut self) {

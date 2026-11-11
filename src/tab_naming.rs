@@ -1,5 +1,5 @@
-//! Event-driven tab naming metadata (OSC 7 and OSC 133;E).
-//! No process polling, shell invocation or per-frame work is needed.
+//! Tab names from native foreground executables and OSC metadata.
+//! No shell invocation or per-frame process lookup is needed.
 
 const MAX_METADATA_BYTES: usize = 4096;
 const MAX_PROGRAM_BYTES: usize = 128;
@@ -155,6 +155,31 @@ pub fn label(
     .unwrap_or_else(|| truncate(shell, max_chars))
 }
 
+/// Prefer the executable resolved from the actual foreground PTY process
+/// group over the user's typed command or an alias. Keep all old naming
+/// modes and OSC fallback behavior unchanged when OS lookup is unavailable.
+#[allow(clippy::too_many_arguments)]
+pub fn label_with_process(
+    actual_process: Option<&str>,
+    cwd: Option<&str>,
+    command_hint: Option<&str>,
+    title: &str,
+    running: bool,
+    shell: &str,
+    mode: &str,
+    home: Option<&str>,
+    max_chars: usize,
+) -> String {
+    if mode == "smart" && running {
+        if let Some(name) = actual_process
+            .and_then(|value| program_from_osc133(value.as_bytes()))
+        {
+            return truncate(&name, max_chars.max(1));
+        }
+    }
+    label(cwd, command_hint, title, running, shell, mode, home, max_chars)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +262,34 @@ mod tests {
             "nvim",
             "explicit OSC 133 metadata takes priority over the window title",
         );
+    }
+
+    #[test]
+    fn actual_process_wins_over_alias_and_fish_window_title() {
+        let base = |running, mode| label_with_process(
+            Some("nvim"),
+            Some("/Users/dan/code/rst"),
+            Some("vim"),
+            "vim ~/code/rst",
+            running, "fish", mode, Some("/Users/dan"), 13,
+        );
+        assert_eq!(base(true, "smart"), "nvim");
+        assert_eq!(base(false, "smart"), "~/code/rst");
+        assert_eq!(base(true, "directory"), "~/code/rst");
+        assert_eq!(base(true, "title"), "vim ~/code/r…");
+        assert_eq!(base(true, "shell"), "fish");
+    }
+
+    #[test]
+    fn process_lookup_failure_falls_back_to_existing_hints() {
+        assert_eq!(label_with_process(
+            None, Some("/Users/dan"), Some("vim"), "vim ~",
+            true, "fish", "smart", Some("/Users/dan"), 13,
+        ), "vim");
+        assert_eq!(label_with_process(
+            Some("not a valid executable"), Some("/Users/dan"), None, "k9s ~",
+            true, "fish", "smart", Some("/Users/dan"), 13,
+        ), "k9s");
     }
 
     #[test]
