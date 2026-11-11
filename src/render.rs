@@ -246,7 +246,7 @@ impl Renderer {
         selection: Option<Selection>,
         preedit: Option<&Preedit>,
     ) {
-        paint_backgrounds(
+        paint_backgrounds_with_cursor(
             pixels,
             width,
             height,
@@ -255,6 +255,7 @@ impl Renderer {
             self.cell_height,
             self.padding,
             selection,
+            preedit.is_none(),
         );
 
         for row in 0..screen.rows {
@@ -270,7 +271,9 @@ impl Renderer {
                 if x >= width {
                     break;
                 }
-                let (_, bg) = cell_colors(screen, row, col, cell, selection);
+                let (_, bg) = cell_colors_with_cursor(
+                    screen, row, col, cell, selection, preedit.is_none(),
+                );
                 rect(
                     pixels,
                     width,
@@ -300,7 +303,9 @@ impl Renderer {
                 if !cell.style.visible(screen.text_blink_on) {
                     continue;
                 }
-                let (fg, bg) = cell_colors(screen, row, col, cell, selection);
+                let (fg, bg) = cell_colors_with_cursor(
+                    screen, row, col, cell, selection, preedit.is_none(),
+                );
                 let ink = effective_ink_color(cell.style, fg, bg);
                 if cell.ch != ' ' {
                     let spill = icon_spill(screen, row, col, cell, selection, self.cell_width);
@@ -318,8 +323,10 @@ impl Renderer {
 
         // Unlike the block cursor, underline and bar must be painted over
         // the completed glyphs. Otherwise the text can hide the thin stroke.
-        paint_cursor(pixels, width, height, screen,
-                     self.cell_width, self.cell_height, self.padding);
+        if preedit.is_none() {
+            paint_cursor(pixels, width, height, screen,
+                         self.cell_width, self.cell_height, self.padding);
+        }
         if let Some(preedit) = preedit {
             self.draw_preedit(pixels, width, height, screen, preedit);
         }
@@ -832,6 +839,7 @@ fn sample_glyph(glyph: &Glyph, x: usize, y: usize, dest_w: usize, dest_h: usize)
 /// application-provided cell colors reach every window edge.
 ///
 /// An explicit nonzero padding is still respected as a user preference.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn paint_backgrounds(
     pixels: &mut [u32],
@@ -842,6 +850,24 @@ fn paint_backgrounds(
     cell_height: usize,
     padding: usize,
     selection: Option<Selection>,
+) {
+    paint_backgrounds_with_cursor(
+        pixels, width, height, screen,
+        cell_width, cell_height, padding, selection, true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_backgrounds_with_cursor(
+    pixels: &mut [u32],
+    width: usize,
+    height: usize,
+    screen: &Screen,
+    cell_width: usize,
+    cell_height: usize,
+    padding: usize,
+    selection: Option<Selection>,
+    show_cursor: bool,
 ) {
     pixels.fill(if screen.reverse_video {
         screen.palette.foreground
@@ -874,7 +900,9 @@ fn paint_backgrounds(
             if x >= width {
                 break;
             }
-            let (_, background) = cell_colors(screen, row, col, cell, selection);
+            let (_, background) = cell_colors_with_cursor(
+                screen, row, col, cell, selection, show_cursor,
+            );
             let start_x = if col == 0 { 0 } else { x };
             let end_x = if col + cell.width as usize >= screen.cols {
                 width
@@ -948,8 +976,19 @@ fn cell_colors(
     cell: Cell,
     selection: Option<Selection>,
 ) -> (u32, u32) {
+    cell_colors_with_cursor(screen, row, col, cell, selection, true)
+}
+
+fn cell_colors_with_cursor(
+    screen: &Screen,
+    row: usize,
+    col: usize,
+    cell: Cell,
+    selection: Option<Selection>,
+    show_cursor: bool,
+) -> (u32, u32) {
     let selected = selection.is_some_and(|selection| selection.contains(screen, col, row));
-    let cursor = cursor_is_visible(screen)
+    let cursor = show_cursor && cursor_is_visible(screen)
         && screen.cursor_style.shape == CursorShape::Block
         && row == screen.y
         && col == screen.x.min(screen.cols - 1);
