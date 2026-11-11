@@ -1576,4 +1576,30 @@ mod tests {
         assert_eq!(terminal.screen.grid[0][0].ch, ' ');
     }
 
+
+    #[test]
+    fn ime_composition_hides_the_original_cursor_even_when_preview_wraps() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(4, 3, 0, palette);
+        terminal.advance(b"\x1b[3;4H"); // last column of last row
+        let preedit = crate::ime::Preedit { text: "界".into(), cursor: Some((3, 3)) };
+        let width = renderer.cell_width * terminal.screen.cols;
+        let height = renderer.cell_height * terminal.screen.rows;
+        let x = 3 * renderer.cell_width;
+        let y = 2 * renderer.cell_height;
+
+        let mut ordinary = vec![0u32; width * height];
+        renderer.draw(&mut ordinary, width, height, &terminal.screen, None, None);
+        let mut composing = vec![0u32; width * height];
+        renderer.draw(&mut composing, width, height, &terminal.screen, None, Some(&preedit));
+
+        assert_eq!(ordinary[y * width + x], terminal.screen.palette.cursor);
+        assert_eq!(composing[y * width + x], terminal.screen.palette.background);
+        assert_eq!(terminal.screen.x, 3);
+        assert_eq!(terminal.screen.y, 2);
+    }
+
 }
