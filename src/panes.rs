@@ -93,7 +93,7 @@ impl Layout {
             return self.panes(rect);
         }
         let focus = if let Some(rail) = self.rail_rect(rect, rail_width) {
-            let gap = DIVIDER.min(rect.width.saturating_sub(rail.width + 1));
+            let gap = 1.min(rect.width.saturating_sub(rail.width + 1));
             Rect {
                 width: rect.width - rail.width - gap,
                 ..rect
@@ -117,32 +117,27 @@ impl Layout {
         }
         panes
     }
-    /// None is the restore button; remaining entries select a collapsed pane.
-    pub fn rail_entries(
-        &self,
-        rect: Rect,
-        rail_width: usize,
-        row_height: usize,
-    ) -> Vec<(Option<u64>, Rect)> {
+    /// A few physical pixels per collapsed pane, spanning the content height.
+    pub fn rail_entries(&self, rect: Rect, rail_width: usize) -> Vec<(u64, Rect)> {
         let Some(rail) = self.rail_rect(rect, rail_width) else {
             return Vec::new();
         };
-        let mut ids = vec![None];
-        ids.extend(
-            self.ids()
-                .into_iter()
-                .filter(|id| *id != self.focused)
-                .map(Some),
-        );
-        let height = row_height.min(rail.height / ids.len());
+        let ids: Vec<_> = self
+            .ids()
+            .into_iter()
+            .filter(|id| *id != self.focused)
+            .collect();
+        let count = ids.len();
         ids.into_iter()
             .enumerate()
             .map(|(index, id)| {
+                let start = index * rail.width / count;
+                let end = (index + 1) * rail.width / count;
                 (
                     id,
                     Rect {
-                        y: rail.y + index * height,
-                        height,
+                        x: rail.x + start,
+                        width: end - start,
                         ..rail
                     },
                 )
@@ -682,7 +677,7 @@ mod zoom_tests {
         assert!(layout.toggle_zoom());
         assert_eq!(layout.visible_panes(rect, 160), original);
         assert_eq!(layout.resize_panes(rect, 160), original);
-        assert!(layout.rail_entries(rect, 160, 32).is_empty());
+        assert!(layout.rail_entries(rect, 160).is_empty());
     }
     #[test]
     fn sidebar_and_zoomed_pane_stay_in_bounds_when_window_is_tiny() {
@@ -702,7 +697,7 @@ mod zoom_tests {
                 if width > 0 {
                     assert!(focused.width > 0);
                 }
-                for (_, entry) in layout.rail_entries(rect, 200, 40) {
+                for (_, entry) in layout.rail_entries(rect, 200) {
                     assert!(entry.x + entry.width <= rect.x + width);
                     assert!(entry.y + entry.height <= rect.y + height);
                     assert!(!focused.contains(entry.x, entry.y));

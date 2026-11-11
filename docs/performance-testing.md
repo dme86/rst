@@ -273,8 +273,12 @@ use hidden-output handling: their output updates unread/title metadata, but does
 not trigger a terminal redraw for every chunk.
 
 Native macOS checks covered nested splits → full pane view → original splits,
-clicking a collapsed pane, the Restore button, state across tab switches, actual
+clicking a collapsed pane, restoration with the same shortcut, state across tab switches, actual
 enlarged PTY dimensions, and closing the enlarged pane down to a single remaining
-pane. The sidebar's press/release gesture is consumed locally even when Restore
-removes the sidebar before mouse release. Existing selections/drag reports may
+pane. Clicks on collapsed edges are consumed locally. Existing selections/drag reports may
 still finish at the edge of the active pane.
+
+Collapsed panes now occupy only 3 physical pixels each, drawn as low-contrast
+stacked edges without labels or a Restore button. The F shortcut restores the
+layout, and an edge can still be clicked to select that pane. No text shaping
+or foreground-process polling is added for these hints when the tab bar is off.

@@ -118,16 +118,16 @@ OSC 7 metadata provides an existing local directory.
 | Focus with the mouse | **Click inside the pane** | Same |
 
 **Full pane view:** Press the F shortcut to expand the focused pane into the
-terminal area, with the others collapsed into a narrow sidebar on the right.
-Press the same shortcut again, or click **Restore**, to return to the exact
+terminal area, with the others reduced to faint, unlabelled edges on the right (3 physical pixels per pane).
+Press the same shortcut again to return to the exact
 split tree. The OS window itself does not enter fullscreen. Click a collapsed
-pane (or use the directional focus shortcuts) to bring it forward while staying
+edge (or use the directional focus shortcuts) to bring it forward while staying
 in full pane view. This mode is remembered separately for each tab.
 
 Collapsed shells keep running at their ordinary split grid sizes; only the
 expanded pane receives the enlarged PTY size. Output in collapsed panes marks
-its sidebar entry as unread without repeatedly rendering the hidden terminal.
-Closing a pane updates the sidebar; when only one remains, the sidebar goes away.
+its edge with a slightly brighter tint without repeatedly rendering the hidden terminal.
+Closing a pane updates the collapsed edges; when only one remains, they go away.
 Creating a new split returns to the normal split layout. Full pane view uses the
 same terminal resizing behavior described below.
 

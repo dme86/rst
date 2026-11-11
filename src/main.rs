@@ -165,12 +165,11 @@ impl App {
     }
 
     fn pane_rail_width(&self) -> usize {
-        self.renderer.as_ref().map_or(0, |renderer| renderer.cell_width * 14 + renderer.padding * 2)
+        self.layouts[&self.current_tab()].ids().len().saturating_sub(1) * 3
     }
 
-    fn pane_rail_entries(&self) -> Vec<(Option<u64>, panes::Rect)> {
-        let row_height = self.renderer.as_ref().map_or(0, |renderer| renderer.cell_height + 12);
-        self.layouts[&self.current_tab()].rail_entries(self.content_rect(), self.pane_rail_width(), row_height)
+    fn pane_rail_entries(&self) -> Vec<(u64, panes::Rect)> {
+        self.layouts[&self.current_tab()].rail_entries(self.content_rect(), self.pane_rail_width())
     }
 
     fn toggle_pane_zoom(&mut self) {
@@ -509,16 +508,9 @@ impl App {
         let rail_rect = self.layouts[&self.current_tab()].rail_rect(self.content_rect(), self.pane_rail_width());
         let rail_entries = self.pane_rail_entries();
         let rail_items: Vec<_> = rail_entries.iter().map(|(id, rect)| {
-            let (title, unread) = if let Some(id) = id {
-                let session = self.inactive_sessions.iter().find(|session| session.id == *id).expect("collapsed session");
-                let label = tab_naming::label_with_process(session.pty.foreground_name(),
-                    session.terminal.screen.cwd.as_deref(), session.terminal.screen.foreground_program.as_deref(),
-                    &session.terminal.screen.title, Self::tab_may_have_foreground_job(&session.terminal.screen),
-                    &self.shell_label, &self.config.tabs.name_mode, self.home_dir.as_deref(), 10);
-                let index = self.layouts[&self.current_tab()].ids().iter().position(|pane| pane == id).unwrap_or(0) + 1;
-                (format!("{index} {label}"), session.unread)
-            } else { ("Restore".into(), false) };
-            (*rect, title, unread)
+            let unread = self.inactive_sessions.iter().find(|session| session.id == *id)
+                .is_some_and(|session| session.unread);
+            (*rect, unread)
         }).collect();
         let active_rect = self.active_pane_rect();
         let native = self.native_cursor_enabled() && active_rect.width > 0 && active_rect.height > 0;
@@ -590,7 +582,7 @@ impl App {
         }
         if let Some(rail) = rail_rect {
             renderer.draw_collapsed_panes(&mut buffer, stride, size.height as usize,
-                &self.terminal.screen, rail, &rail_items, &self.config.tabs);
+                &self.terminal.screen, rail, &rail_items);
         }
         if self.config.tabs.enabled {
             renderer.draw_tab_bar(&mut buffer, stride, size.height as usize, &self.terminal.screen,
@@ -1200,7 +1192,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Query only the owned PTYs' foreground process groups, at a
         // bounded frequency while a command/TUI is running. There is no
         // process-tree scan, external 'ps', or per-frame process lookup.
-        if (self.config.tabs.enabled || self.layouts[&self.current_tab()].zoomed)
+        if self.config.tabs.enabled
             && self.config.tabs.name_mode == "smart"
             && self.window.is_some()
             && self.has_foreground_job()
@@ -1408,12 +1400,11 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some((id, _)) = self.pane_rail_entries().into_iter().find(|(_, rect)|
                                 rect.contains(self.mouse.0.max(0.0) as usize, self.mouse.1.max(0.0) as usize))
                             {
-                                if let Some(id) = id { self.focus_session(id); } else { self.toggle_pane_zoom(); }
+                                self.focus_session(id);
                             }
                         }
-                        // Consume the matching release even if Restore removes
-                        // the sidebar before it arrives. Active-pane drags may
-                        // still release over the sidebar and finish normally.
+                        // Consume strip clicks locally; drags originating in
+                        // the active pane may still finish over the strip.
                         self.rail_mouse_grab = true;
                         return;
                     }
