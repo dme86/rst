@@ -1,7 +1,7 @@
 //! Minimal, allocation-free layout decisions for the optional native tab bar.
 //! Painting belongs to render.rs; PTY/session management belongs to App.
 
-pub const TAB_COLUMNS: usize = 16;
+pub const TAB_COLUMNS: usize = 20;
 
 #[derive(Clone, Debug)]
 pub struct TabDisplay {
@@ -100,12 +100,12 @@ mod tests {
     #[test]
     fn active_tab_remains_visible_when_list_overflows() {
         let layout = BarLayout::for_width(10, 8, 70);
-        assert_eq!(layout.count, 4);
+        assert_eq!(layout.count, 3);
         assert!(layout.first <= 8);
         assert!(8 < layout.first + layout.count);
         assert_eq!(layout.hit_test(1, 70, true), Some(TabAction::Select(layout.first)));
-        assert_eq!(layout.hit_test(15, 70, true), Some(TabAction::Close(layout.first)));
-        assert_eq!(layout.hit_test(65, 70, true), Some(TabAction::New));
+        assert_eq!(layout.hit_test(19, 70, true), Some(TabAction::Close(layout.first)));
+        assert_eq!(layout.hit_test(61, 70, true), Some(TabAction::New));
     }
 
     #[test]
