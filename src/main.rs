@@ -881,7 +881,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
-                if self.help_open { return; }
+                if self.help_open || self.url_picker.is_some() { return; }
                 let tracking = self.terminal.screen.mouse_tracking;
                 let at = self.cell_at_mouse();
                 // Once Shift begins a local selection inside a TUI, finish
