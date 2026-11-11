@@ -7,6 +7,7 @@ use fontdue::{Font, FontSettings, Metrics};
 use crate::{
     config::FontConfig,
     terminal::{Cell, CursorShape, Screen, TextStyle},
+    selection::Selection,
 };
 
 struct Glyph {
@@ -239,7 +240,7 @@ impl Renderer {
         width: usize,
         height: usize,
         screen: &Screen,
-        selection: Option<((usize, usize), (usize, usize))>,
+        selection: Option<Selection>,
     ) {
         paint_backgrounds(
             pixels,
@@ -533,7 +534,7 @@ fn icon_spill(
     row: usize,
     col: usize,
     cell: Cell,
-    selection: Option<((usize, usize), (usize, usize))>,
+    selection: Option<Selection>,
     cell_width: usize,
 ) -> (usize, usize) {
     if !is_nerd_icon(cell.ch) {
@@ -761,7 +762,7 @@ fn paint_backgrounds(
     cell_width: usize,
     cell_height: usize,
     padding: usize,
-    selection: Option<((usize, usize), (usize, usize))>,
+    selection: Option<Selection>,
 ) {
     pixels.fill(if screen.reverse_video {
         screen.palette.foreground
@@ -866,16 +867,9 @@ fn cell_colors(
     row: usize,
     col: usize,
     cell: Cell,
-    selection: Option<((usize, usize), (usize, usize))>,
+    selection: Option<Selection>,
 ) -> (u32, u32) {
-    let selected = selection.is_some_and(|(a, b)| {
-        let (start, end) = if (a.1, a.0) <= (b.1, b.0) {
-            (a, b)
-        } else {
-            (b, a)
-        };
-        (row, col) >= (start.1, start.0) && (row, col) <= (end.1, end.0)
-    });
+    let selected = selection.is_some_and(|selection| selection.contains(screen, col, row));
     let cursor = cursor_is_visible(screen)
         && screen.cursor_style.shape == CursorShape::Block
         && row == screen.y
