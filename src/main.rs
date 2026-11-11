@@ -3,6 +3,7 @@ mod charset;
 mod command_capture;
 mod copy_feedback;
 mod config;
+mod cursor_layer;
 mod help;
 mod ime;
 mod keyboard;
@@ -79,6 +80,7 @@ struct App {
     window: Option<Arc<Window>>,
     surface: Option<Surface<OwnedDisplayHandle, Arc<Window>>>,
     renderer: Option<Renderer>,
+    native_cursor: Option<cursor_layer::CursorLayer>,
     modifiers: ModifiersState,
     ime: ImeState,
     mouse: (f64, f64),
@@ -374,8 +376,19 @@ impl App {
         );
     }
 
+    fn native_cursor_enabled(&self) -> bool {
+        self.native_cursor.is_some() && self.terminal.screen.cursor_style.blink
+            && self.terminal.screen.show_cursor && self.terminal.screen.view_offset == 0
+            && self.ime.preedit.is_none() && !self.help_open && self.url_picker.is_none()
+            && self.toast.is_none() && self.bell_flash_until.is_none()
+    }
+
     fn redraw(&mut self) {
         let draw_started = self.profile.as_ref().map(|_| Instant::now());
+        let native_cursor = self.native_cursor_enabled();
+        if !native_cursor {
+            if let Some(layer) = &mut self.native_cursor { layer.hide(); }
+        }
         // Only materialize the tiny tab label list when the bar is enabled.
         let tab_items = if self.config.tabs.enabled {
             self.tab_displays()
@@ -418,6 +431,8 @@ impl App {
         let start = top_bar.saturating_mul(width_px);
         let end = start.saturating_add(content_h.saturating_mul(width_px));
         if content_h != 0 {
+            let cursor_phase = self.terminal.screen.cursor_blink_on;
+            if native_cursor { self.terminal.screen.cursor_blink_on = false; }
             renderer.draw(
                 &mut buffer[start..end],
                 width_px,
@@ -426,6 +441,23 @@ impl App {
                 self.selection,
                 self.ime.preedit.as_ref(),
             );
+            if native_cursor {
+                self.terminal.screen.cursor_blink_on = true;
+                let patch = renderer.cursor_patch(&mut buffer[start..end], width_px, content_h,
+                    &self.terminal.screen, self.selection);
+                if let Some(mut patch) = patch {
+                    patch.y += top_bar;
+                    if !self.native_cursor.as_mut().expect("native cursor selected").update(
+                        patch, window.scale_factor(), self.config.cursor.blink_interval_ms)
+                    {
+                        self.native_cursor = None;
+                        self.terminal.screen.cursor_blink_on = cursor_phase;
+                        renderer.draw(&mut buffer[start..end], width_px, content_h,
+                            &self.terminal.screen, self.selection, self.ime.preedit.as_ref());
+                    }
+                } else if let Some(layer) = &mut self.native_cursor { layer.hide(); }
+            }
+            self.terminal.screen.cursor_blink_on = cursor_phase;
         }
         if self.bell_flash_until.is_some_and(|until| Instant::now() < until) {
             render::paint_bell_border(
@@ -984,7 +1016,7 @@ fn blink_step(
 
 impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(profile) = &mut self.profile { profile.wait(); }
+        if let Some(profile) = &mut self.profile { profile.wait(self.native_cursor.as_ref().and_then(|layer| layer.phase())); }
         let now = Instant::now();
         let mut next_deadline: Option<Instant> = None;
 
@@ -993,6 +1025,9 @@ impl ApplicationHandler<UserEvent> for App {
         if self.terminal.screen.cursor_style.blink
             && self.terminal.screen.show_cursor
             && self.window.is_some()
+            && self.terminal.screen.view_offset == 0
+            && self.ime.preedit.is_none() && !self.help_open && self.url_picker.is_none()
+            && !self.native_cursor_enabled()
         {
             let interval = Duration::from_millis(self.config.cursor.blink_interval_ms);
             let (visible, next) = blink_step(
@@ -1141,6 +1176,7 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        self.native_cursor = cursor_layer::CursorLayer::new(&window);
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.surface = Some(surface);
@@ -1607,6 +1643,7 @@ fn main() -> Result<()> {
         window: None,
         surface: None,
         renderer: None,
+        native_cursor: None,
         modifiers: ModifiersState::empty(),
         ime: ImeState::default(),
         mouse: (0.0, 0.0),

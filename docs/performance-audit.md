@@ -88,3 +88,13 @@ reproducible real-window startup/idle/load benchmarks. The earlier limitations
 above describe the original review; native macOS runtime measurements are now
 available in that guide. Wayland execution and coverage-guided fuzzing remain
 unverified.
+
+## Follow-up: macOS cursor idle CPU
+
+The measured approximately 5% idle CPU cost with cursor blinking is fixed by
+moving the cursor patch animation to Core Animation. The application no longer
+schedules full-window presents solely to blink that cursor. Three four-second
+samples and a twenty-second sample had no measurable rst CPU increment with
+blinking enabled. See the [measurement guide](performance-testing.md#cursor-compositor-fix)
+for implementation boundaries, renderer equivalence checks and before/after
+numbers. Wayland retains the software fallback and was not benchmarked here.

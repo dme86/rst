@@ -34,9 +34,31 @@ pub fn needs_shaping(text: &str, ligatures: bool) -> bool {
         return true;
     }
     ligatures
-        && ["=>", "->", "==", "!=", "<=", ">=", "&&", "||", "::",
-            "ffi", "ffl", "fi", "fl", "<-", "++", "**", "==="]
-            .iter().any(|pattern| text.contains(pattern))
+        && text
+            .as_bytes()
+            .windows(2)
+            .any(|pair| ascii_pair_needs_shaping(pair[0], pair[1]))
+}
+
+/// All ASCII candidates are pairs; ffi/ffl/=== also contain fi/fl/==.
+pub fn ascii_pair_needs_shaping(a: u8, b: u8) -> bool {
+    matches!(
+        (a, b),
+        (b'=', b'>')
+            | (b'-', b'>')
+            | (b'=', b'=')
+            | (b'!', b'=')
+            | (b'<', b'=')
+            | (b'>', b'=')
+            | (b'&', b'&')
+            | (b'|', b'|')
+            | (b':', b':')
+            | (b'f', b'i')
+            | (b'f', b'l')
+            | (b'<', b'-')
+            | (b'+', b'+')
+            | (b'*', b'*')
+    )
 }
 
 pub fn shape(source: &FontBytes, text: &str, ligatures: bool) -> Option<ShapedText> {
@@ -52,12 +74,16 @@ pub fn shape(source: &FontBytes, text: &str, ligatures: bool) -> Option<ShapedTe
     } else {
         use std::str::FromStr;
         ["liga=0", "clig=0", "dlig=0", "calt=0"]
-            .iter().filter_map(|feature| rustybuzz::Feature::from_str(feature).ok())
+            .iter()
+            .filter_map(|feature| rustybuzz::Feature::from_str(feature).ok())
             .collect()
     };
     let shaped = rustybuzz::shape(&face, &features, buffer);
     let mut total_advance = 0i64;
-    let glyphs = shaped.glyph_infos().iter().zip(shaped.glyph_positions().iter())
+    let glyphs = shaped
+        .glyph_infos()
+        .iter()
+        .zip(shaped.glyph_positions().iter())
         .map(|(info, pos)| {
             total_advance += pos.x_advance as i64;
             ShapedGlyph {
@@ -95,14 +121,20 @@ mod tests {
 
     #[test]
     fn corrupt_or_empty_fonts_do_not_crash_the_renderer() {
-        let font = FontBytes { bytes: vec![1, 2, 3].into(), face_index: 0 };
+        let font = FontBytes {
+            bytes: vec![1, 2, 3].into(),
+            face_index: 0,
+        };
         assert!(shape(&font, "fi", true).is_none());
         assert!(shape(&font, "", true).is_none());
     }
 
     #[test]
     fn very_large_shaping_input_is_refused() {
-        let font = FontBytes { bytes: vec![].into(), face_index: 0 };
+        let font = FontBytes {
+            bytes: vec![].into(),
+            face_index: 0,
+        };
         assert!(shape(&font, &"a".repeat(5000), true).is_none());
     }
 }

@@ -140,8 +140,68 @@ The parser-only workload measured 67.3 MiB/s, excluding rendering and transport.
 The extended robustness run passed 512,000 randomized operations plus the
 multi-session and read-boundary checks.
 
-The cursor comparison identifies a remaining performance opportunity: cursor
-blinks currently repaint the software-rendered window. Updating only damaged
-regions or caching unchanged terminal pixels could reduce that idle cost.
-This change adds measurements and the discovered crash fix; it does not silently
-disable cursor blinking or claim that idle repaint optimization is complete.
+The cursor comparison identified the full-window blink repaint as a performance
+problem. The following fix supersedes that initial result.
+
+### Cursor compositor fix
+
+The macOS softbuffer backend allocates a full framebuffer and submits a new
+Core Animation image on every present; its damage API still presents the entire
+image. Merely skipping some glyph/background work did not reduce the measured
+idle CPU cost. macOS cursor blinking now uses a small Core Animation layer:
+
+- The normal framebuffer is drawn without the blinking cursor.
+- Only the cursor row is rendered again to extract the exact changed pixel
+  rectangle, including block cursor glyph colors and ligature boundaries.
+- The original framebuffer is restored, and the small patch is animated with
+  discrete opacity changes at the configured blink interval by the compositor.
+- No application blink deadline, redraw, full-frame allocation or present is
+  scheduled for that cursor while the native layer is active.
+- Output, selection, cursor movement/style, zoom and resizing update the patch;
+  an unchanged patch reuses its animation. IME, help, link picker, notices and
+  visual bells hide the layer so it cannot cover those overlays. Hidden cursors
+  and scrollback do not schedule cursor blink deadlines.
+
+The native layer is macOS-only. If it cannot be created, the existing software
+path is retained; Wayland continues to use that path. Blink interval, cursor
+shape and terminal text are preserved. Other timed effects, including SGR text
+blinking, still have their own clocks. The compositor has work to do, but only
+for the cursor patch; the CPU figures below measure rst's process, not the
+WindowServer or GPU.
+
+Same benchmark settings as above, with cursor blinking still enabled:
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Median idle CPU, three 4-second samples | 4.98% of one core | 0.00%* |
+| Idle CPU, additional 20-second sample | — | 0.00%* |
+| Median spawn → prompt-frame submission | 319 ms | 299 ms |
+| Load PTY roundtrip p95 | 3.49 ms | 3.44 ms |
+| Median parsed load | 10.3 MiB/s | 11.1 MiB/s |
+
+*No CPU increment measurable at the OS counter's resolution, not a claim of
+literally zero instructions. These short measurements are diagnostic evidence,
+not a cross-machine speed guarantee. A separate renderer optimization also skips
+redundant default-background fills and unnecessary ASCII shaping setup.
+
+A pixel-equivalence regression test composes the extracted patch onto a
+cursor-free frame and compares it against full cursor rendering for block,
+bar and underline shapes, Unicode/wide cells, ligatures, selection, reverse
+video, colored backgrounds and fractional window padding. It also verifies
+that extracting the patch restores the original base pixels.
+
+Opt-in profiles additionally record `native_cursor_phases`: bit 1 means an
+opaque cursor was observed, bit 2 means a transparent cursor was observed,
+and 3 means both phases were seen in the compositor's presentation layer.
+Sampling happens only on existing event-loop turns and adds no blink timer.
+This distinguishes animated blinking from merely disabling the cursor.
+The final diagnostic run observed both phases (`3`). While other tests/builds
+were running concurrently, its idle CPU sample was 0.25% of one core; the
+uncontended three-run median and the longer sample above were 0.00% at counter
+resolution. Do not interpret that resolution as a permanent zero-CPU guarantee.
+
+For a longer idle sample:
+
+```sh
+python3 scripts/benchmark.py --runs 1 --idle-seconds 20 --output target/benchmarks/long-idle.json
+```

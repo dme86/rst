@@ -20,6 +20,7 @@ pub struct Profile {
     frame_max_ms: f64,
     queue_max_ms: f64,
     waits: u64,
+    cursor_phases: u8,
 }
 
 impl Profile {
@@ -49,6 +50,7 @@ impl Profile {
             frame_max_ms: 0.0,
             queue_max_ms: 0.0,
             waits: 0,
+            cursor_phases: 0,
         }))
     }
 
@@ -86,8 +88,16 @@ impl Profile {
         self.frame_max_ms = self.frame_max_ms.max(duration);
     }
 
-    pub fn wait(&mut self) {
+    pub fn wait(&mut self, cursor_opacity: Option<f32>) {
         self.waits += 1;
+        if let Some(opacity) = cursor_opacity {
+            if opacity >= 0.99 {
+                self.cursor_phases |= 1;
+            }
+            if opacity <= 0.01 {
+                self.cursor_phases |= 2;
+            }
+        }
     }
 }
 
@@ -97,11 +107,11 @@ impl Drop for Profile {
             value.map_or_else(|| "null".into(), |value| format!("{value:.3}"))
         }
         let result = writeln!(self.file,
-            "{{\"schema\":1,\"main_started_unix_ms\":{:.3},\"first_output_ms\":{},\"first_frame_ms\":{},\"prompt_received_ms\":{},\"prompt_frame_ms\":{},\"output_bytes\":{},\"output_chunks\":{},\"frames\":{},\"frame_total_ms\":{:.3},\"frame_max_ms\":{:.3},\"output_queue_max_ms\":{:.3},\"event_loop_waits\":{}}}",
+            "{{\"schema\":1,\"main_started_unix_ms\":{:.3},\"first_output_ms\":{},\"first_frame_ms\":{},\"prompt_received_ms\":{},\"prompt_frame_ms\":{},\"output_bytes\":{},\"output_chunks\":{},\"frames\":{},\"frame_total_ms\":{:.3},\"frame_max_ms\":{:.3},\"output_queue_max_ms\":{:.3},\"event_loop_waits\":{},\"native_cursor_phases\":{}}}",
             self.main_started_unix_ms, number(self.first_output_ms), number(self.first_frame_ms),
             number(self.prompt_received_ms), number(self.prompt_frame_ms),
             self.output_bytes, self.output_chunks, self.frames, self.frame_total_ms,
-            self.frame_max_ms, self.queue_max_ms, self.waits);
+            self.frame_max_ms, self.queue_max_ms, self.waits, self.cursor_phases);
         if let Err(err) = result {
             eprintln!("rst: write profile: {err}");
         }

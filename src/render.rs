@@ -87,6 +87,15 @@ fn load_style_face(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorPatch {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u32>,
+}
+
 pub struct Renderer {
     fonts: Vec<Font>,
     font_sources: Vec<FontBytes>,
@@ -393,6 +402,15 @@ impl Renderer {
     ) -> Vec<bool> {
         let cells = screen.display_row(row);
         let mut covered = vec![false; screen.cols];
+        // Most rows (including idle blank rows) contain no shaping work.
+        // Avoid font fallback lookups and per-cell String allocations there.
+        if !cells.iter().any(|cell| !cell.ch.is_ascii() || cell.combining_len != 0)
+            && (!self.ligatures || !cells.windows(2).any(|pair| {
+                shaping::ascii_pair_needs_shaping(pair[0].ch as u8, pair[1].ch as u8)
+            }))
+        {
+            return covered;
+        }
         let mut col = 0usize;
         while col < screen.cols {
             let start = col;
@@ -506,7 +524,16 @@ impl Renderer {
         selection: Option<Selection>,
         preedit: Option<&Preedit>,
     ) {
-        paint_backgrounds_with_cursor(
+        self.draw_rows(pixels, width, height, screen, selection, preedit, 0..screen.rows);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_rows(
+        &mut self, pixels: &mut [u32], width: usize, height: usize,
+        screen: &Screen, selection: Option<Selection>, preedit: Option<&Preedit>,
+        rows: std::ops::Range<usize>,
+    ) {
+        paint_background_rows(
             pixels,
             width,
             height,
@@ -516,38 +543,10 @@ impl Renderer {
             self.padding,
             selection,
             preedit.is_none(),
+            rows.clone(),
         );
 
-        for row in 0..screen.rows {
-            let y = self.padding + row * self.cell_height;
-            if y >= height {
-                break;
-            }
-            for (col, &cell) in screen.display_row(row).iter().enumerate() {
-                if cell.width == 0 {
-                    continue;
-                }
-                let x = self.padding + col * self.cell_width;
-                if x >= width {
-                    break;
-                }
-                let (_, bg) = cell_colors_with_cursor(
-                    screen, row, col, cell, selection, preedit.is_none(),
-                );
-                rect(
-                    pixels,
-                    width,
-                    height,
-                    x,
-                    y,
-                    self.cell_width * cell.width as usize,
-                    self.cell_height,
-                    bg,
-                );
-            }
-        }
-
-        for row in 0..screen.rows {
+        for row in rows.clone() {
             let y = self.padding + row * self.cell_height;
             if y >= height {
                 break;
@@ -586,13 +585,47 @@ impl Renderer {
 
         // Unlike the block cursor, underline and bar must be painted over
         // the completed glyphs. Otherwise the text can hide the thin stroke.
-        if preedit.is_none() {
+        if preedit.is_none() && rows.contains(&screen.y) {
             paint_cursor(pixels, width, height, screen,
                          self.cell_width, self.cell_height, self.padding);
         }
         if let Some(preedit) = preedit {
             self.draw_preedit(pixels, width, height, screen, preedit);
         }
+    }
+
+    /// Extract only pixels changed by the cursor, restoring the cursor-free
+    /// framebuffer before returning. Includes any ligature reshaping in its row.
+    pub fn cursor_patch(
+        &mut self, pixels: &mut [u32], width: usize, height: usize,
+        screen: &Screen, selection: Option<Selection>,
+    ) -> Option<CursorPatch> {
+        if !cursor_is_visible(screen) || screen.y >= screen.rows || width == 0 { return None; }
+        let y = self.padding.saturating_add(screen.y.saturating_mul(self.cell_height));
+        let bottom = y.saturating_add(self.cell_height).min(height);
+        if y >= bottom || pixels.len() < width.checked_mul(height)? { return None; }
+        let original = pixels[y * width..bottom * width].to_vec();
+        self.draw_rows(pixels, width, height, screen, selection, None, screen.y..screen.y + 1);
+        let row = &pixels[y * width..bottom * width];
+        let mut left = width;
+        let mut right = 0;
+        let mut top = bottom - y;
+        let mut end = 0;
+        for (i, (&on, &off)) in row.iter().zip(&original).enumerate() {
+            if on != off {
+                left = left.min(i % width);
+                right = right.max(i % width + 1);
+                top = top.min(i / width);
+                end = end.max(i / width + 1);
+            }
+        }
+        let patch = if left < right && top < end {
+            let mut data = Vec::with_capacity((right - left) * (end - top));
+            for dy in top..end { data.extend_from_slice(&row[dy * width + left..dy * width + right]); }
+            Some(CursorPatch { x: left, y: y + top, width: right - left, height: end - top, pixels: data })
+        } else { None };
+        pixels[y * width..bottom * width].copy_from_slice(&original);
+        patch
     }
 
     /// Paint one optional tab row, reusing the terminal's own rasterizer.
@@ -1526,6 +1559,7 @@ fn paint_backgrounds(
     );
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn paint_backgrounds_with_cursor(
     pixels: &mut [u32],
@@ -1538,16 +1572,33 @@ fn paint_backgrounds_with_cursor(
     selection: Option<Selection>,
     show_cursor: bool,
 ) {
-    pixels.fill(if screen.reverse_video {
+    paint_background_rows(pixels, width, height, screen, cell_width, cell_height,
+        padding, selection, show_cursor, 0..screen.rows);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_background_rows(
+    pixels: &mut [u32], width: usize, height: usize, screen: &Screen,
+    cell_width: usize, cell_height: usize, padding: usize,
+    selection: Option<Selection>, show_cursor: bool, rows: std::ops::Range<usize>,
+) {
+    let default_background = if screen.reverse_video {
         screen.palette.foreground
     } else {
         screen.palette.background
-    });
+    };
+    if rows.start == 0 && rows.end == screen.rows {
+        pixels.fill(default_background);
+    } else {
+        let y = if rows.start == 0 { 0 } else { padding.saturating_add(rows.start.saturating_mul(cell_height)) };
+        let bottom = if rows.end == screen.rows { height } else { padding.saturating_add(rows.end.saturating_mul(cell_height)).min(height) };
+        rect(pixels, width, height, 0, y, width, bottom.saturating_sub(y), default_background);
+    }
     if width == 0 || height == 0 || cell_width == 0 || cell_height == 0 {
         return;
     }
 
-    for row in 0..screen.rows {
+    for row in rows.clone() {
         let y = padding.saturating_add(row.saturating_mul(cell_height));
         if y >= height {
             break;
@@ -1576,6 +1627,9 @@ fn paint_backgrounds_with_cursor(
             let (_, background) = cell_colors_with_cursor(
                 screen, row, col, cell, selection, false,
             );
+            // The initial fill already painted default-colored cells and
+            // their padding. Only non-default backgrounds need rectangles.
+            if background == default_background { continue; }
             let start_x = if col == 0 { 0 } else { x };
             let end_x = if col + cell.width as usize >= screen.cols {
                 width
@@ -1596,11 +1650,9 @@ fn paint_backgrounds_with_cursor(
         }
     }
 
-    // Paint the block cursor strictly inside its one grid cell. The regular
-    // renderer redraws the same exact rectangle during its glyph pass;
-    // the separate layer also keeps paint_backgrounds() correct for callers
-    // and regression tests, without tinting fractional window padding.
-    if show_cursor && cursor_is_visible(screen)
+    // Paint the block cursor strictly inside its grid cell after all cell
+    // backgrounds, without tinting fractional window padding.
+    if show_cursor && rows.contains(&screen.y) && cursor_is_visible(screen)
         && screen.cursor_style.shape == CursorShape::Block
         && screen.x < screen.cols && screen.y < screen.rows
     {
@@ -2758,6 +2810,52 @@ mod startup_benchmark {
             let renderer = super::Renderer::new(&config.font, config.window.padding, 1.0).unwrap();
             eprintln!("font startup: {:?}, {} regular faces", start.elapsed(), renderer.fonts.len());
             std::hint::black_box(renderer);
+        }
+    }
+}
+
+#[cfg(test)]
+mod cursor_patch_tests {
+    use super::*;
+
+    #[test]
+    fn compositor_patch_matches_full_cursor_render_and_restores_base() {
+        let config: crate::config::Config = toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let mut renderer = Renderer::new(&config.font, 2, 1.0).unwrap();
+        for shape in [CursorShape::Block, CursorShape::Bar, CursorShape::Underline] {
+            for (text, x, y, reverse, selected) in [
+                ("prompt> ", 8, 0, false, false),
+                ("fi -> !=", 1, 0, false, true),
+                ("\x1b[41;4mcolored spaces   ", 4, 0, false, true),
+                ("界e\u{301}👩\u{200d}💻", 1, 0, true, false),
+                ("\x1b[41;4mcolored spaces   ", 13, 3, false, true),
+            ] {
+                let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+                let mut term = crate::terminal::Terminal::new(14, 4, 8, palette);
+                term.advance(text.as_bytes());
+                term.screen.x = x;
+                term.screen.y = y;
+                term.screen.reverse_video = reverse;
+                term.screen.cursor_style.shape = shape;
+                let selection = selected.then(|| Selection::new(&term.screen, (0, 0), crate::selection::SelectionSnap::Line, false));
+                // Include fractional right/bottom padding, as in native windows.
+                let width = 2 * renderer.padding + renderer.cell_width * 14 + 3;
+                let height = 2 * renderer.padding + renderer.cell_height * 4 + 1;
+                let mut base = vec![0; width * height];
+                term.screen.cursor_blink_on = false;
+                renderer.draw(&mut base, width, height, &term.screen, selection, None);
+                let original = base.clone();
+                term.screen.cursor_blink_on = true;
+                let patch = renderer.cursor_patch(&mut base, width, height, &term.screen, selection).unwrap();
+                assert_eq!(base, original, "patch extraction must restore the base frame");
+                for dy in 0..patch.height {
+                    let target = (patch.y + dy) * width + patch.x;
+                    base[target..target + patch.width].copy_from_slice(&patch.pixels[dy * patch.width..(dy + 1) * patch.width]);
+                }
+                let mut reference = vec![0; width * height];
+                renderer.draw(&mut reference, width, height, &term.screen, selection, None);
+                assert_eq!(base, reference, "shape {shape:?}, x {x}, y {y}, reverse {reverse}");
+            }
         }
     }
 }

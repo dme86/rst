@@ -107,7 +107,7 @@ def percentile(values, fraction):
     return values[min(len(values) - 1, max(0, math.ceil(len(values) * fraction) - 1))]
 
 
-def run_once(binary, startup_shell, cursor_blink):
+def run_once(binary, startup_shell, cursor_blink, idle_seconds):
     with tempfile.TemporaryDirectory(prefix='rst-benchmark-') as root:
         directory = Path(root)
         config = directory / 'config' / 'rst'
@@ -133,7 +133,7 @@ def run_once(binary, startup_shell, cursor_blink):
                 before = cpu_seconds(process.pid)
                 start = time.monotonic()
                 idle_rss = rss_kib(process.pid)
-                time.sleep(4)
+                time.sleep(idle_seconds)
                 idle_cpu = max(0, cpu_seconds(process.pid) - before)
                 idle_elapsed = time.monotonic() - start
                 (directory / 'load').touch()
@@ -168,6 +168,7 @@ def run_once(binary, startup_shell, cursor_blink):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path('target/release/rst'))
+    parser.add_argument('--idle-seconds', type=float, default=4, help='Idle CPU sampling interval (default: 4 seconds)')
     parser.add_argument('--runs', type=int, default=3)
     parser.add_argument('--output', type=Path, default=Path('target/benchmarks/runtime.json'))
     parser.add_argument('--startup-shell', help='Include this shell\'s interactive rc startup (-i -c); no dotfiles are modified')
@@ -177,13 +178,15 @@ def main():
     if args.fixture:
         fixture(args.fixture)
         return
+    if not math.isfinite(args.idle_seconds) or not 0 < args.idle_seconds <= 30:
+        parser.error('--idle-seconds must be finite and in 0..30')
     if args.runs < 1:
         parser.error('--runs must be positive')
     binary = args.binary.resolve(strict=True)
     samples = []
     for index in range(args.runs):
         print(f'Run {index + 1}/{args.runs}: opening a test window; please leave it untouched.', flush=True)
-        samples.append(run_once(binary, args.startup_shell, not args.no_cursor_blink))
+        samples.append(run_once(binary, args.startup_shell, not args.no_cursor_blink, args.idle_seconds))
     report = {
         'schema': 1, 'platform': platform.platform(), 'python': platform.python_version(),
         'binary': str(binary), 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(), 'startup_shell': args.startup_shell,
