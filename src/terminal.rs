@@ -1420,6 +1420,10 @@ mod osc_tests;
 mod cursor_tests;
 
 #[cfg(test)]
+#[path = "charset_tests.rs"]
+mod charset_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
