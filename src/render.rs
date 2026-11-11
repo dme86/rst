@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     config::FontConfig,
+    copy_feedback::{CopyNotice, NoticeKind},
     ime::{self, Preedit},
     help,
     shaping::{self, FontBytes, ShapedText},
@@ -600,6 +601,122 @@ impl Renderer {
         };
         let bottom = top + panel_h.saturating_sub(self.cell_height);
         self.draw_ui_text(pixels, width, height, text_x, bottom, footer, border, cols, screen);
+    }
+
+    /// Briefly tint ONLY screen cells belonging to the OSC 133 command
+    /// whose text was successfully copied. The effect is composited over
+    /// pixels, leaving cell colors, cursor, scrollback and selection intact.
+    pub fn draw_output_copy_highlight(
+        &self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        screen: &Screen,
+        output_id: u32,
+        opacity: u8,
+    ) {
+        if output_id == 0 || opacity == 0 || self.cell_width == 0
+            || self.cell_height == 0 || width == 0 || height == 0
+        {
+            return;
+        }
+        let accent = screen.palette.ansi[2]; // current theme's green
+        let wash_alpha = (opacity as u16 * 66 / 255) as u8;
+        let edge_alpha = (opacity as u16 * 200 / 255) as u8;
+        for row in 0..screen.rows {
+            let top = self.padding.saturating_add(row.saturating_mul(self.cell_height));
+            if top >= height { break; }
+            let cells = screen.display_row(row);
+            let mut col = 0usize;
+            while col < cells.len() {
+                if cells[col].output_id != output_id {
+                    col += 1;
+                    continue;
+                }
+                let first = col;
+                while col < cells.len() && cells[col].output_id == output_id {
+                    col += 1;
+                }
+                let x = self.padding.saturating_add(first.saturating_mul(self.cell_width));
+                let segment_w = (col - first).saturating_mul(self.cell_width);
+                blend_rect(
+                    pixels, width, height, x, top,
+                    segment_w, self.cell_height, accent, wash_alpha,
+                );
+                // A soft accent at the left of each contiguous output run
+                // keeps the selection readable without replacing glyph ink.
+                blend_rect(
+                    pixels, width, height, x, top,
+                    2.min(segment_w), self.cell_height, accent, edge_alpha,
+                );
+            }
+        }
+    }
+
+    /// Compact native clipboard confirmation with a soft visual hierarchy.
+    /// Both the card and the actual copied output share the same fade clock.
+    pub fn draw_copy_notice(
+        &mut self,
+        pixels: &mut [u32],
+        width: usize,
+        height: usize,
+        screen: &Screen,
+        notice: &CopyNotice,
+        opacity: u8,
+    ) {
+        if opacity == 0 || width == 0 || height == 0
+            || self.cell_width == 0 || self.cell_height == 0
+        {
+            return;
+        }
+
+        let accent = match notice.kind {
+            NoticeKind::Copied => screen.palette.ansi[2],
+            NoticeKind::Warning => screen.palette.ansi[3],
+        };
+        let max_cols = screen.cols.saturating_sub(5).clamp(1, 54);
+        let panel_w = (max_cols + 4).saturating_mul(self.cell_width).min(width);
+        let panel_h = (self.cell_height.saturating_mul(2) + 22).min(height);
+        let left = width.saturating_sub(panel_w) / 2;
+        let top = height.saturating_sub(panel_h.saturating_add(self.cell_height * 2));
+        let panel_opacity = (opacity as u16 * 236 / 255) as u8;
+
+        // A tiny offset shadow and 5-pixel stepped corners suggest a soft
+        // floating card without an OS toolkit or changes to terminal data.
+        blend_rect(
+            pixels, width, height,
+            left.saturating_add(3), top.saturating_add(4),
+            panel_w, panel_h, 0x000000,
+            (opacity as u16 * 65 / 255) as u8,
+        );
+        let body = screen.palette.background;
+        if panel_h > 8 && panel_w > 10 {
+            blend_rect(pixels, width, height, left + 5, top, panel_w - 10, panel_h, body, panel_opacity);
+            blend_rect(pixels, width, height, left + 2, top + 2, panel_w - 4, panel_h - 4, body, panel_opacity);
+        }
+        blend_rect(pixels, width, height, left, top + 5.min(panel_h),
+                   panel_w, panel_h.saturating_sub(10), body, panel_opacity);
+        blend_rect(pixels, width, height, left, top + 5.min(panel_h),
+                   3.min(panel_w), panel_h.saturating_sub(10), accent,
+                   (opacity as u16 * 216 / 255) as u8);
+
+        let text_x = left.saturating_add(self.cell_width.saturating_mul(2));
+        let text_y = top.saturating_add(7);
+        let header = match notice.kind {
+            NoticeKind::Copied => "✓  COPIED TO CLIPBOARD",
+            NoticeKind::Warning => "!  COULD NOT COPY",
+        };
+        let title_ink = blend(accent, body, opacity);
+        let sub_ink = blend(screen.palette.foreground, body, opacity);
+        self.draw_ui_text(
+            pixels, width, height, text_x, text_y,
+            header, title_ink, max_cols, screen,
+        );
+        self.draw_ui_text(
+            pixels, width, height,
+            text_x, text_y.saturating_add(self.cell_height + 2),
+            &notice.detail, sub_ink, max_cols, screen,
+        );
     }
 
     /// A brief confirmation/error message after a copy shortcut.
@@ -1377,6 +1494,33 @@ fn rect(
         let start = py * stride + x.min(stride);
         let end = py * stride + x.saturating_add(w).min(stride);
         pixels[start..end].fill(color);
+    }
+}
+
+/// Alpha composite a rectangle over the existing frame, preserving the
+/// rendered glyph pixels underneath instead of overwriting the terminal.
+#[allow(clippy::too_many_arguments)]
+fn blend_rect(
+    pixels: &mut [u32],
+    stride: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+    alpha: u8,
+) {
+    if alpha == 0 || stride == 0 { return; }
+    let valid_height = height.min(pixels.len() / stride);
+    let x_end = x.saturating_add(w).min(stride);
+    if x >= x_end { return; }
+    for row in y..y.saturating_add(h).min(valid_height) {
+        let start = row * stride + x;
+        let end = row * stride + x_end;
+        for pixel in &mut pixels[start..end] {
+            *pixel = blend(color, *pixel, alpha);
+        }
     }
 }
 
