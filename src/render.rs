@@ -1841,4 +1841,91 @@ mod tests {
         assert_eq!(terminal.screen.y, 2);
     }
 
+
+    #[test]
+    fn shaped_glyph_ids_match_same_fontdue_face_and_collection_index() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        assert_eq!(renderer.font_sources.len(), renderer.fonts.len());
+        assert_eq!(renderer.styled_sources.len(), renderer.styled_fonts.len());
+        let Some(shaped) = shaping::shape(&renderer.font_sources[0], "ABC", true) else {
+            return; // Some platform-specific system font formats may not parse.
+        };
+        assert_eq!(shaped.glyphs.len(), 3);
+        for (glyph, letter) in shaped.glyphs.iter().zip("ABC".chars()) {
+            assert_eq!(glyph.index, renderer.fonts[0].lookup_glyph_index(letter));
+        }
+    }
+
+    #[test]
+    fn ligature_candidate_shaping_respects_exact_grid_width_and_color() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(12, 2, 0, palette);
+        term.advance(b"fi -> != <>".as_slice());
+        term.screen.show_cursor = false;
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &term.screen, None, None);
+        assert_eq!(term.screen.grid[0][0].ch, 'f');
+        assert_eq!(term.screen.grid[0][1].ch, 'i');
+        assert_eq!(term.screen.x, 11);
+        assert!(pixels.iter().any(|&pixel| pixel != term.screen.palette.background));
+        // Shaping never writes back into the terminal grid.
+        assert_eq!(term.screen.grid[0][3].ch, '-');
+        assert_eq!(term.screen.grid[0][4].ch, '>');
+    }
+
+    #[test]
+    fn ligatures_can_be_disabled_without_disabling_non_ascii_shaping() {
+        let mut config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        config.font.ligatures = false;
+        let Ok(renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        assert!(!renderer.ligatures);
+        assert!(!shaping::needs_shaping("fi => ffi", renderer.ligatures));
+        assert!(shaping::needs_shaping("مرحبا", renderer.ligatures));
+    }
+
+    #[test]
+    fn shaping_cache_reuses_run_and_clears_on_font_zoom() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let Some(shaped) = shaping::shape(&renderer.font_sources[0], "fi", true) else {
+            return;
+        };
+        renderer.shape_cache.insert((0, 0, true, "fi".to_owned()), shaped);
+        assert_eq!(renderer.shape_cache.len(), 1);
+        renderer.set_font_size(config.font.size + 1.0, 1.0);
+        assert!(renderer.shape_cache.is_empty());
+        assert!(renderer.indexed_glyphs.is_empty());
+    }
+
+    #[test]
+    fn arabic_preedit_is_shaped_without_mutating_terminal_cells() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut term = crate::terminal::Terminal::new(16, 2, 0, palette);
+        term.advance(b"hello");
+        let preedit = crate::ime::Preedit {
+            text: "مرحبا".to_owned(),
+            cursor: Some((10, 10)),
+        };
+        let width = term.screen.cols * renderer.cell_width;
+        let height = term.screen.rows * renderer.cell_height;
+        let mut pixels = vec![0u32; width * height];
+        renderer.draw(&mut pixels, width, height, &term.screen, None, Some(&preedit));
+        assert_eq!(term.screen.grid[0][0].ch, 'h');
+        assert_eq!(term.screen.grid[0][1].ch, 'e');
+        assert!(term.screen.history.is_empty());
+        assert!(pixels.iter().any(|&pixel| pixel == term.screen.palette.selection));
+    }
+
 }
