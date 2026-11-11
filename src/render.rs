@@ -224,8 +224,10 @@ impl Renderer {
         if face.1 == 0 {
             self.font_sources.get(face.0)
         } else {
-            self.styled_sources.get(face.0)?
-                [face.1 as usize - 1].as_ref()
+            self.styled_sources
+                .get(face.0)?
+                .get(face.1 as usize - 1)?
+                .as_ref()
         }
     }
 
