@@ -702,45 +702,21 @@ impl Renderer {
 
         let text_x = left.saturating_add(self.cell_width.saturating_mul(2));
         let text_y = top.saturating_add(7);
-        let header = match notice.kind {
-            NoticeKind::Copied => "✓  COPIED TO CLIPBOARD",
-            NoticeKind::Warning => "!  COULD NOT COPY",
+        let icon = match notice.kind {
+            NoticeKind::Copied => "✓",
+            NoticeKind::Warning => "!",
         };
+        let header = format!("{icon}  {}", notice.title);
         let title_ink = blend(accent, body, opacity);
         let sub_ink = blend(screen.palette.foreground, body, opacity);
         self.draw_ui_text(
             pixels, width, height, text_x, text_y,
-            header, title_ink, max_cols, screen,
+            &header, title_ink, max_cols, screen,
         );
         self.draw_ui_text(
             pixels, width, height,
             text_x, text_y.saturating_add(self.cell_height + 2),
             &notice.detail, sub_ink, max_cols, screen,
-        );
-    }
-
-    /// A brief confirmation/error message after a copy shortcut.
-    pub fn draw_toast(
-        &mut self,
-        pixels: &mut [u32],
-        width: usize,
-        height: usize,
-        screen: &Screen,
-        message: &str,
-    ) {
-        if width == 0 || height == 0 || self.cell_width == 0 || self.cell_height == 0 {
-            return;
-        }
-        let cols = message.chars().count().min(screen.cols.saturating_sub(2)).max(1);
-        let panel_w = (cols + 2).saturating_mul(self.cell_width).min(width);
-        let panel_h = (self.cell_height + 6).min(height);
-        let left = width.saturating_sub(panel_w) / 2;
-        let top = height.saturating_sub(panel_h + self.cell_height);
-        rect(pixels, width, height, left, top, panel_w, panel_h, screen.palette.selection);
-        self.draw_ui_text(
-            pixels, width, height,
-            left.saturating_add(self.cell_width), top + 3,
-            message, screen.palette.foreground, cols, screen,
         );
     }
 
@@ -2220,9 +2196,12 @@ mod tests {
         let height = term.screen.rows * renderer.cell_height;
         let mut pixels = vec![0u32; width * height];
         renderer.draw_help_overlay(&mut pixels, width, height, &term.screen, 200, false);
-        renderer.draw_toast(
-            &mut pixels, width, height, &term.screen,
+        let notice = crate::copy_feedback::CopyNotice::warning(
             "No command markers: run rst --install-shell-integration",
+            std::time::Instant::now(),
+        );
+        renderer.draw_copy_notice(
+            &mut pixels, width, height, &term.screen, &notice, 255,
         );
         assert!(pixels.iter().any(|&px| px != 0));
     }
