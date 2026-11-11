@@ -100,7 +100,7 @@ impl OutputBuffer {
     }
 
     fn newline(&mut self) {
-        if !self.can_append(self.line.len().saturating_mul(4).saturating_add(1)) {
+        if !self.can_append(1) {
             return;
         }
         for ch in self.line.drain(..) {
@@ -131,7 +131,8 @@ impl OutputBuffer {
         if self.too_large {
             return Err(CopyError::TooLarge);
         }
-        let mut text = self.previous_lines.clone();
+        let mut text = String::with_capacity(self.previous_lines.len() + self.line.len() * 4);
+        text.push_str(&self.previous_lines);
         text.extend(self.line.iter().copied());
         if text.is_empty() {
             Err(CopyError::NoOutput)
