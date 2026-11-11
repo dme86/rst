@@ -1504,6 +1504,10 @@ mod charset_tests;
 mod attention_tests;
 
 #[cfg(test)]
+#[path = "grapheme_tests.rs"]
+mod grapheme_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
