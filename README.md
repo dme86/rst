@@ -21,7 +21,7 @@ make run
 
 On macOS, `make run` builds a native `target/debug/rst.app` with the Dock icon and opens it through Launch Services. On Linux/Wayland, it runs the executable directly. Both use `$SHELL` (default: `/bin/sh`).
 
-For macOS packaging: `make macos-app` (debug), `make macos-release` (optimized) and `make install-macos` (copies to `~/Applications`). For direct console logs run `make run-cli`. The locally built macOS app is unsigned; public distribution requires signing and notarization. The generated app icon uses the checked-in `assets/logo.png`.
+For macOS packaging: `make macos-app` (debug), `make macos-release` (optimized) and `make install-macos` (copies to `~/Applications`). For direct console logs run `make run-cli`. The locally built macOS app is unsigned; public distribution requires signing and notarization. The generated app icon uses the checked-in `assets/logo.png`, and rst also sets it as its active macOS Dock/⌘Tab icon through AppKit, even when launched as a bare binary with `cargo run`. After updating an existing app, quit all old rst instances and run `make run` (development) or `make install-macos` (installed app) to pick up the new icon. The packaging script registers the refreshed bundle with Launch Services without restarting your Dock.
 
 Other targets: `make build`, `make release`, `make test`, `make fmt`, `make lint`, `make clean`, `make help`.
 
