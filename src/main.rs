@@ -1367,12 +1367,9 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|tab| tab.id == tab_id)
                     {
                         let old_revision = tab.terminal.screen.tab_label_revision;
-                        let old_title = tab.terminal.screen.title.clone();
                         tab.terminal.advance(&bytes);
-                        if tab.terminal.screen.tab_label_revision != old_revision
-                            || tab.terminal.screen.title != old_title
-                        {
-                            became_unread = true; // Refresh tab label on metadata changes.
+                        if tab.terminal.screen.tab_label_revision != old_revision {
+                            became_unread = true; // Only metadata changes repaint hidden tabs.
                         }
                         let replies = tab.terminal.screen.take_replies();
                         if !replies.is_empty() { tab.pty.write(&replies); }
