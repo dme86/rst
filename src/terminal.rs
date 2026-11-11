@@ -1389,7 +1389,11 @@ impl Perform for Screen {
                 let palette = self.initial_palette.clone();
                 let osc52_allowed = self.osc52_write_allowed;
                 let default_cursor_style = self.default_cursor_style;
+                // A BEL before RIS in the same PTY read still rings; the
+                // reset must not discard unconsumed UI notifications.
+                let pending_bells = self.pending_bells;
                 *self = Self::new(cols, rows, limit, palette);
+                self.pending_bells = pending_bells;
                 self.osc52_write_allowed = osc52_allowed;
                 self.set_default_cursor_style(default_cursor_style);
             }
