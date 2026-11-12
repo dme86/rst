@@ -118,6 +118,22 @@ pub struct Renderer {
     text_ink_bottom: i32,
 }
 
+/// Font-independent powerline wedge; all writes are clipped by rect.
+#[allow(clippy::too_many_arguments)]
+fn arrow_segment(pixels: &mut [u32], width: usize, height: usize,
+    x: usize, y: usize, w: usize, h: usize, color: u32, left: bool,
+) {
+    if h == 0 || w == 0 { return; }
+    let arrow = (h / 2).min(w);
+    rect(pixels, width, height, x + if left { arrow } else { 0 }, y,
+        w - arrow, h, color);
+    for row in 0..h {
+        let inset = (2 * row + 1).abs_diff(h) * arrow / h;
+        rect(pixels, width, height, x + if left { inset } else { w - arrow },
+            y + row, arrow - inset, 1, color);
+    }
+}
+
 impl Renderer {
     pub fn new(config: &FontConfig, padding: u32, scale: f64) -> Result<Self> {
         let mut db = Database::new();
@@ -641,6 +657,7 @@ impl Renderer {
         items: &[TabDisplay],
         active_index: usize,
         config: &TabsConfig,
+        status: Option<&tabs::TabStatus>,
     ) {
         if !config.enabled || width == 0 || height == 0
             || self.cell_width == 0 || self.cell_height == 0
@@ -662,53 +679,108 @@ impl Renderer {
         let accent = color(&config.colors.accent);
         let unread = color(&config.colors.unread);
         rect(pixels, width, height, 0, top, width, bar_h, background);
-        if config.position == "bottom" {
+        if !config.powerline && config.position == "bottom" {
             rect(pixels, width, height, 0, top, width, 1.min(bar_h), accent);
-        } else {
+        } else if !config.powerline {
             rect(pixels, width, height, 0,
                  top + bar_h.saturating_sub(1), width, 1.min(bar_h), accent);
         }
 
-        let columns = (width.saturating_sub(self.padding * 2) / self.cell_width).max(1);
-        let layout = BarLayout::for_width(items.len(), active_index, columns);
+        let columns = (width / self.cell_width).max(1);
+        let status = status.filter(|_| config.show_status);
+        let status_columns = status.map_or(0, |status| status.columns(columns));
+        let tab_columns = columns.saturating_sub(status_columns);
+        let layout = BarLayout::for_items(items, active_index, tab_columns, config.close_buttons, config.powerline);
+        let mut tab_column: usize = 1;
         for (slot, index) in (layout.first..layout.first + layout.count).enumerate() {
             let item = &items[index];
-            let x = self.padding.saturating_add(
-                (1 + slot * layout.slot_columns).saturating_mul(self.cell_width),
-            );
-            let w = layout.slot_columns.saturating_mul(self.cell_width).saturating_sub(2);
+            let slot_columns = layout.widths[slot];
+            let x = (tab_column - 1).saturating_mul(self.cell_width);
+            let w = slot_columns.saturating_mul(self.cell_width)
+                .saturating_sub(if config.powerline { 0 } else { 2 });
             if x >= width { break; }
             let bg = if item.active { active_background } else { inactive_background };
             let ink = if item.active { active_foreground } else { foreground };
-            rect(pixels, width, height, x, top.saturating_add(3),
-                 w.min(width - x), bar_h.saturating_sub(5), bg);
+            if config.powerline {
+                // Fill the outgoing tip's corners with the following tab's
+                // color so adjacent segments interlock without a dark gap.
+                if slot + 1 < layout.count {
+                    let next_bg = if items[index + 1].active { active_background } else { inactive_background };
+                    rect(pixels, width, height, x, top + 3,
+                        w.min(width - x), bar_h.saturating_sub(5), next_bg);
+                }
+                arrow_segment(pixels, width, height, x, top + 3,
+                    w.min(width - x), bar_h.saturating_sub(5), bg, false);
+            } else {
+                rect(pixels, width, height, x, top.saturating_add(3),
+                     w.min(width - x), bar_h.saturating_sub(5), bg);
+            }
             if item.unread {
                 rect(pixels, width, height, x,
                      top.saturating_add(3), 3.min(w), bar_h.saturating_sub(5), unread);
             }
-            let available = layout.slot_columns.saturating_sub(
-                if config.close_buttons && layout.slot_columns >= 7 { 5 } else { 2 }
+            let available = slot_columns.saturating_sub(
+                if config.close_buttons && slot_columns >= 7 { 5 } else { 2 }
             );
             let title = if item.title.is_empty() { "shell" } else { &item.title };
-            let label = format!("{} {}", index + 1, title);
+            let number = (index + 1).to_string();
+            let separator = if config.powerline { 2 } else { 1 };
+            let label = format!("{number}{}{}", " ".repeat(separator), title);
+            if config.powerline && slot_columns >= 7 {
+                let seam_x = x + (number.len() + 1) * self.cell_width;
+                let h = bar_h.saturating_sub(5);
+                let arrow = (self.cell_width / 2).max(1);
+                for row in 0..h {
+                    let offset = arrow.saturating_sub((2 * row + 1).abs_diff(h) * arrow / h.max(1));
+                    rect(pixels, width, height, seam_x + offset, top + 3 + row, 1, 1, ink);
+                }
+            }
             self.draw_ui_text(
                 pixels, width, height,
                 x.saturating_add(self.cell_width), top.saturating_add(3),
                 &label, ink, available, screen,
             );
-            if config.close_buttons && layout.slot_columns >= 7 {
+            if config.close_buttons && slot_columns >= 7 {
                 let close_x = x.saturating_add(
-                    (layout.slot_columns - 2).saturating_mul(self.cell_width),
+                    (slot_columns - 2).saturating_mul(self.cell_width),
                 );
                 self.draw_ui_text(pixels, width, height,
                     close_x, top.saturating_add(3), "×", ink, 1, screen);
             }
+            tab_column += slot_columns;
         }
-        let plus_column = 1 + layout.count * layout.slot_columns;
-        if plus_column + 1 < columns {
-            let plus_x = self.padding.saturating_add(plus_column * self.cell_width);
+        let plus_column = tab_column;
+        if plus_column + 1 < tab_columns {
+            let plus_x = (plus_column - 1) * self.cell_width;
             self.draw_ui_text(pixels, width, height,
                 plus_x, top.saturating_add(3), "+", accent, 1, screen);
+        }
+        if let Some(status) = status {
+            let mut column = tab_columns;
+            for (index, part) in status.segments(columns).iter().enumerate() {
+                use unicode_width::UnicodeWidthStr;
+                let count = part.width() + 3;
+                let x = width.saturating_sub((columns - column) * self.cell_width);
+                let fill = if index % 2 == 0 { inactive_background } else { background };
+                if config.powerline {
+                    // Let the left-pointing tip enter the preceding field,
+                    // rather than leaving a bar-background gap at the seam.
+                    if index > 0 {
+                        let previous_fill = if index % 2 == 0 { background } else { inactive_background };
+                        rect(pixels, width, height, x, top + 3,
+                            (bar_h.saturating_sub(5) / 2).min(count * self.cell_width),
+                            bar_h.saturating_sub(5), previous_fill);
+                    }
+                    arrow_segment(pixels, width, height, x, top + 3,
+                        count * self.cell_width, bar_h.saturating_sub(5), fill, true);
+                } else {
+                    rect(pixels, width, height, x, top + 3,
+                        count * self.cell_width, bar_h.saturating_sub(5), fill);
+                }
+                self.draw_ui_text(pixels, width, height, x + 2 * self.cell_width,
+                    top + 3, part, foreground, count - 3, screen);
+                column += count;
+            }
         }
     }
 
@@ -727,7 +799,7 @@ impl Renderer {
             let shade = blend(screen.palette.background, screen.palette.foreground, 8);
             for y in area.y..area.y.saturating_add(area.height).min(bottom) {
                 // A one-pixel crease moves back and forth within the same
-                // three-pixel strip. Neighboring folds lean in opposite ways.
+                // five-pixel strip. Neighboring folds lean in opposite ways.
                 let phase = if amplitude == 0 { 0 } else { ((y - area.y) / 2) % (amplitude * 2) };
                 let offset = if phase <= amplitude { phase } else { amplitude * 2 - phase };
                 let offset = if index % 2 == 0 { offset } else { amplitude - offset };
@@ -2595,6 +2667,50 @@ mod tests {
 
 
     #[test]
+    fn powerline_status_is_clipped_and_stays_outside_terminal_cells() {
+        let mut config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        config.tabs.enabled = true;
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return };
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let term = crate::terminal::Terminal::new(120, 4, 0, palette);
+        let items = vec![crate::tabs::TabDisplay { title: "fish".into(), active: true, unread: false }];
+        let status = crate::tabs::TabStatus { date: "2026-11-12".into(), time: "12:10".into(),
+            hostname: "MacBook-Air-von-Daniel-2".into(), next_refresh: std::time::Instant::now() };
+        let bar_h = crate::tabs::bar_height(renderer.cell_height, true);
+        for columns in [1, 5, 25, 120] {
+            for bottom in [false, true] {
+                config.tabs.position = if bottom { "bottom" } else { "top" }.into();
+                let width = columns * renderer.cell_width;
+                let height = bar_h + renderer.cell_height;
+                let mut pixels = vec![0xdeadbeefu32; width * height];
+                renderer.draw_tab_bar(&mut pixels, width, height, &term.screen,
+                    &items, 0, &config.tabs, Some(&status));
+                let terminal_row = if bottom { 0 } else { bar_h };
+                assert!(pixels[terminal_row * width..(terminal_row + 1) * width]
+                    .iter().all(|pixel| *pixel == 0xdeadbeef));
+                if columns == 120 && !bottom {
+                    let status_start = columns - status.columns(columns);
+                    let seam = (status_start + status.date.len() + 3) * renderer.cell_width;
+                    let segment_height = bar_h.saturating_sub(5);
+                    let tip_x = seam + 1;
+                    assert_eq!(pixels[3 * width + tip_x],
+                        crate::tabs::parse_color(&config.tabs.colors.inactive_background).unwrap());
+                    assert_eq!(pixels[(3 + segment_height / 2) * width + tip_x],
+                        crate::tabs::parse_color(&config.tabs.colors.background).unwrap());
+                    if let Ok(path) = std::env::var("RST_BAR_PREVIEW") {
+                        let mut ppm = format!("P6\n{width} {bar_h}\n255\n").into_bytes();
+                        for pixel in &pixels[..width * bar_h] {
+                            ppm.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, *pixel as u8]);
+                        }
+                        std::fs::write(path, ppm).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn optional_gruvbox_bar_is_drawn_outside_terminal_cells() {
         let mut config: crate::config::Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
@@ -2615,21 +2731,21 @@ mod tests {
         ];
         let mut pixels = vec![0xdeadbeefu32; width * height];
         let original = pixels.clone();
-        renderer.draw_tab_bar(&mut pixels, width, height, &term.screen, &items, 0, &config.tabs);
+        renderer.draw_tab_bar(&mut pixels, width, height, &term.screen, &items, 0, &config.tabs, None);
         assert_eq!(pixels, original, "disabled bar should not paint anything");
         config.tabs.enabled = true;
-        renderer.draw_tab_bar(&mut pixels, width, height, &term.screen, &items, 0, &config.tabs);
+        renderer.draw_tab_bar(&mut pixels, width, height, &term.screen, &items, 0, &config.tabs, None);
         assert_ne!(pixels, original);
-        assert_eq!(pixels[0], crate::tabs::parse_color("#282828").unwrap());
+        assert_eq!(pixels[0], crate::tabs::parse_color(&config.tabs.colors.background).unwrap());
         assert_eq!(term.screen.grid[0][0].ch, 's');
         assert_eq!(term.screen.history.len(), 0);
 
         config.tabs.position = "bottom".into();
         let mut bottom = original.clone();
-        renderer.draw_tab_bar(&mut bottom, width, height, &term.screen, &items, 1, &config.tabs);
+        renderer.draw_tab_bar(&mut bottom, width, height, &term.screen, &items, 1, &config.tabs, None);
         assert_eq!(bottom[0], original[0], "bottom bar must not paint the top row");
         assert_eq!(bottom[(height - 1) * width],
-                   crate::tabs::parse_color("#282828").unwrap());
+                   crate::tabs::parse_color(&config.tabs.colors.background).unwrap());
     }
 
     #[test]

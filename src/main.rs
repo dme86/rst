@@ -96,6 +96,7 @@ struct App {
     next_cursor_blink: Instant,
     next_text_blink: Instant,
     next_process_probe: Instant,
+    tab_status: tabs::TabStatus,
     focus: FocusTracker,
     bell_limiter: BellLimiter,
     bell_flash_until: Option<Instant>,
@@ -165,7 +166,7 @@ impl App {
     }
 
     fn pane_rail_width(&self) -> usize {
-        self.layouts[&self.current_tab()].ids().len().saturating_sub(1) * 3
+        self.layouts[&self.current_tab()].ids().len().saturating_sub(1) * 5
     }
 
     fn pane_rail_entries(&self) -> Vec<(u64, panes::Rect)> {
@@ -246,13 +247,17 @@ impl App {
     fn tab_bar_action(&self) -> Option<tabs::TabAction> {
         if !self.mouse_in_bar() { return None; }
         let renderer = self.renderer.as_ref()?;
-        let col = (self.mouse.0.max(0.0) as usize)
-            .saturating_sub(renderer.padding) / renderer.cell_width.max(1);
-        let columns = self.grid_size(self.content_rect()).0;
-        let layout = tabs::BarLayout::for_width(
-            self.tab_order.len(), self.active_tab_index(), columns,
+        let col = self.mouse.0.max(0.0) as usize / renderer.cell_width.max(1);
+        let columns = self.window.as_ref()?.inner_size().width as usize / renderer.cell_width.max(1);
+        let columns = columns.saturating_sub(if self.config.tabs.show_status {
+            self.tab_status.columns(columns)
+        } else { 0 });
+        let layout = tabs::BarLayout::for_items(
+            &self.tab_displays(), self.active_tab_index(), columns,
+            self.config.tabs.close_buttons, self.config.tabs.powerline,
         );
-        layout.hit_test(col, columns, self.config.tabs.close_buttons)
+        if col >= columns { return None; }
+        layout.hit_test(col + 1, columns, self.config.tabs.close_buttons)
     }
 
     fn clear_tab_interaction(&mut self) {
@@ -586,7 +591,7 @@ impl App {
         }
         if self.config.tabs.enabled {
             renderer.draw_tab_bar(&mut buffer, stride, size.height as usize, &self.terminal.screen,
-                &items, active_index, &self.config.tabs);
+                &items, active_index, &self.config.tabs, self.config.tabs.show_status.then_some(&self.tab_status));
         }
         window.pre_present_notify();
         if let Err(err) = buffer.present() { eprintln!("rst: present: {err}"); }
@@ -1211,6 +1216,13 @@ impl ApplicationHandler<UserEvent> for App {
             // Start probing immediately when the next foreground job begins.
             self.next_process_probe = now;
         }
+        if self.config.tabs.enabled && self.config.tabs.show_status && self.window.is_some() {
+            if self.tab_status.refresh(now) {
+                if let Some(window) = &self.window { window.request_redraw(); }
+            }
+            let next = self.tab_status.next_refresh;
+            next_deadline = Some(next_deadline.map_or(next, |old| old.min(next)));
+        }
         // No busy redraw when neither blinking nor a bell flash is active.
         event_loop.set_control_flow(
             next_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
@@ -1800,6 +1812,7 @@ fn main() -> Result<()> {
             + Duration::from_millis(config_blink_ms),
         next_text_blink: Instant::now() + Duration::from_millis(800),
         next_process_probe: Instant::now(),
+        tab_status: tabs::TabStatus::new(),
         focus: FocusTracker::default(),
         bell_limiter: BellLimiter::default(),
         bell_flash_until: None,

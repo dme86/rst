@@ -92,6 +92,8 @@ impl Default for UrlPickerConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct TabsConfig {
+    pub powerline: bool,
+    pub show_status: bool,
     pub enabled: bool,
     pub max_tabs: usize,
     pub position: String,
@@ -105,6 +107,8 @@ impl Default for TabsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            powerline: true,
+            show_status: true,
             max_tabs: 10,
             position: "top".into(),
             close_buttons: true,
@@ -129,12 +133,12 @@ pub struct TabColors {
 impl Default for TabColors {
     fn default() -> Self {
         Self {
-            background: "#282828".into(),
-            foreground: "#a89984".into(),
-            inactive_background: "#3c3836".into(),
-            active_background: "#fabd2f".into(),
-            active_foreground: "#282828".into(),
-            accent: "#83a598".into(),
+            background: "#262626".into(),
+            foreground: "#b8b8b8".into(),
+            inactive_background: "#585858".into(),
+            active_background: "#ffaf00".into(),
+            active_foreground: "#262626".into(),
+            accent: "#ffaf00".into(),
             unread: "#b8bb26".into(),
         }
     }
@@ -266,12 +270,12 @@ mod tests {
         assert_eq!(base.tabs.max_tabs, 10);
         assert_eq!(base.tabs.position, "top");
         assert_eq!(base.tabs.name_mode, "smart");
-        assert_eq!(base.tabs.colors.active_background, "#fabd2f");
+        assert_eq!(base.tabs.colors.active_background, "#ffaf00");
         let mut legacy: toml::Value = toml::from_str(include_str!("../config/default.toml")).unwrap();
         legacy.as_table_mut().unwrap().remove("tabs");
         let parsed: Config = legacy.try_into().unwrap();
         assert!(!parsed.tabs.enabled);
-        assert_eq!(parsed.tabs.colors.active_background, "#fabd2f");
+        assert_eq!(parsed.tabs.colors.active_background, "#ffaf00");
         assert_eq!(parsed.tabs.name_mode, "smart");
         let partial: TabsConfig = toml::from_str("enabled = true").unwrap();
         assert!(partial.enabled);

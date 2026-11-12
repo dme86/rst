@@ -65,7 +65,9 @@ pub fn program_from_osc133(raw: &[u8]) -> Option<String> {
     {
         return None;
     }
-    Some(name.to_owned())
+    let display = name.strip_prefix('.').and_then(|name| name.strip_suffix("-wrapped"))
+        .filter(|name| !name.is_empty()).unwrap_or(name);
+    Some(display.to_owned())
 }
 
 /// Fish and other shells can update OSC 0/2 window titles before a TUI
@@ -203,6 +205,8 @@ mod tests {
     fn accepts_only_safe_executable_names() {
         assert_eq!(program_from_osc133(b"/opt/bin/k9s"), Some("k9s".into()));
         assert_eq!(program_from_osc133(b"nvim"), Some("nvim".into()));
+        assert_eq!(program_from_osc133(b"/nix/store/bin/.k9s-wrapped"), Some("k9s".into()));
+        assert_eq!(program_from_osc133(b".hidden"), Some(".hidden".into()));
         assert_eq!(program_from_osc133(b"rust-analyzer"), Some("rust-analyzer".into()));
         assert_eq!(program_from_osc133(b"rm;foo"), None);
         assert_eq!(program_from_osc133(b"k9s\x07"), None);

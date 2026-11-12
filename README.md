@@ -120,7 +120,7 @@ OSC 7 metadata provides an existing local directory.
 | Focus with the mouse | **Click inside the pane** | Same |
 
 **Full pane view:** Press the F shortcut to expand the focused pane into the
-terminal area, with the others reduced to faint, unlabelled accordion folds on the right (3 physical pixels per pane).
+terminal area, with the others reduced to faint, unlabelled accordion folds on the right (5 physical pixels per pane).
 Press the same shortcut again to return to the exact
 split tree. The OS window itself does not enter fullscreen. Click a collapsed
 edge (or use the directional focus shortcuts) to bring it forward while staying
@@ -208,7 +208,9 @@ Install it using `make shell-integration` or
 `rst --install-shell-integration`, and launch a new shell. The picker
 is session-local; URL history is not written to disk.
 
-### Optional native tabs with a Gruvbox bar
+### Optional native tabs with a tmux-style bar
+
+The bar uses charcoal/gray arrow segments and an amber active tab. Date, local time and hostname appear on the right; status yields space to tabs in narrow windows. Set `[tabs].powerline = false` for rectangular tabs or `show_status = false` to hide status. The clock refreshes at most once per minute, without shell commands or timers when tabs/status are disabled. Restart rst after configuration changes.
 
 rst can manage **real, independent terminal sessions** inside one native
 window. Each tab has its own shell, PTY, terminal/scrollback, OSC 133
@@ -228,12 +230,12 @@ close_buttons = true
 name_mode = "smart"   # "smart", "directory", "title", "shell"
 
 [tabs.colors]
-background = "#282828"
-foreground = "#a89984"
-inactive_background = "#3c3836"
-active_background = "#fabd2f"
-active_foreground = "#282828"
-accent = "#83a598"
+background = "#262626"
+foreground = "#b8b8b8"
+inactive_background = "#585858"
+active_background = "#ffaf00"
+active_foreground = "#262626"
+accent = "#ffaf00"
 unread = "#b8bb26"
 ```
 
@@ -277,7 +279,7 @@ that spawn their own descendants can show the group leader rather than
 the deepest nested program. OSC titles from terminal applications remain
 supported.
 
-These are **Gruvbox-inspired, independently editable** default colors.
+These are **tmux-inspired, independently editable** default colors.
 No extra palette dependency is required. The bar occupies exactly one
 font-cell row plus six physical pixels; fullscreen TUIs receive the remaining
 grid size through PTY resize, including when switching tabs or zooming.

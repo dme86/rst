@@ -278,7 +278,7 @@ enlarged PTY dimensions, and closing the enlarged pane down to a single remainin
 pane. Clicks on collapsed edges are consumed locally. Existing selections/drag reports may
 still finish at the edge of the active pane.
 
-Collapsed panes now occupy only 3 physical pixels each, drawn as low-contrast
+Collapsed panes now occupy only 5 physical pixels each, drawn as low-contrast
 zigzag accordion folds without labels or a Restore button. The F shortcut restores the
 layout, and an edge can still be clicked to select that pane. No text shaping
 or foreground-process polling is added for these hints when the tab bar is off.
