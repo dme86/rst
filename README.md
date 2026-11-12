@@ -66,7 +66,11 @@ a specific program.
 
 For an optimized build, use `make macos-release` on macOS or `make release` on
 Linux. Install with `make install-macos` or `make install`, respectively.
-The macOS app is currently unsigned.
+On macOS, build bundles are named **rst Debug** / **rst Preview** and have
+separate app identifiers, so Spotlight cannot confuse them with the installed
+**rst**. `make install-macos` also migrates an existing debug bundle to its own
+identity. Bundles are locally ad-hoc signed, but are not Developer ID signed or
+notarized.
 
 ## Configure
 

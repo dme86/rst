@@ -348,3 +348,44 @@ windowed delay. With the existing maximized configuration, preparing the window
 offscreen removed a further roughly 320 ms. Regression tests compare lazy/eager
 raster pixels for styled text, icons, ligatures and Unicode, and compare worker
 initialization against direct Retina-scale initialization.
+
+### macOS launcher identity correction
+
+The direct executable benchmark above did not establish which app Spotlight
+launched. Follow-up inspection found that macOS's preferred app URL for
+`de.dme86.rst` pointed at the **old debug bundle** in `target/debug/rst.app`,
+while both release bundles had the same identifier. The installed optimized
+executable was therefore not the app selected by the normal bundle lookup.
+
+A Launch Services comparison (three measured runs after one warmup, same
+readiness fixture, existing terminal configurations) measured 983 ms for that
+old debug app and 223 ms for the installed release. After correcting the
+registration, launching via `de.dme86.rst` measured 258 ms versus Alacritty's
+255 ms in a separate three-run check. These are fixture/PTY-readiness times,
+not a measurement of Spotlight search UI latency or physical prompt display.
+Alacritty's normal local configuration also attaches an existing tmux session;
+that is distinct from starting rst's fresh interactive shell. The readiness
+fixture intentionally substitutes the same child in both applications.
+
+Build bundles now use `rst Debug.app` (`de.dme86.rst.debug`) and
+`rst Preview.app` (`de.dme86.rst.preview`). Only the installed `rst.app` uses
+`de.dme86.rst`. Packaging migrates generated legacy bundle paths, and installation
+restores the canonical installed identity. Final metadata/resources are bound
+with a local ad-hoc signature before registration. This is neither Developer ID
+signing nor notarization. `make test-macos-packaging` checks identities,
+signatures and repeat migration in temporary bundles without registering them.
+
+To include the macOS app-launch path in subsequent comparisons:
+
+```sh
+python3 scripts/benchmark-startup.py --app ~/Applications/rst.app \
+  --app-id de.dme86.rst --user-config \
+  --output target/benchmarks/launch-services.json
+```
+
+`--app` uses `open`/Launch Services instead of executing the binary directly;
+`--app-id` checks bundle selection rather than forcing an app path. The supplied
+`--app` path identifies the executable to fingerprint, so first verify that the
+bundle ID resolves to it. `--reference-app /path/to/old.app` compares another
+bundle. The normal search-and-Return interaction in Spotlight is not automated
+by this benchmark.

@@ -55,8 +55,18 @@ def run_once(name, binary, args):
         env = dict(os.environ, RST_PROFILE=str(root / 'profile.json'))
         if not args.user_config:
             env['XDG_CONFIG_HOME'] = str(root)
+        if args.app:
+            target = ['-b', 'org.alacritty'] if name == 'alacritty' else [
+                '-a', str(args.reference_app if name == 'rst-before' else args.app)]
+            if name == 'rst' and args.app_id:
+                target = ['-b', args.app_id]
+            launcher = ['/usr/bin/open', '-n', '-W', *target,
+                        '--env', f'RST_PROFILE={root / "profile.json"}']
+            if not args.user_config:
+                launcher += ['--env', f'XDG_CONFIG_HOME={root}']
+            command = [*launcher, '--args', *command[1:]]
         started = time.time_ns()
-        process = subprocess.run(command, env=env, capture_output=True, timeout=30)
+        process = subprocess.run(command, env=env, capture_output=True, timeout=60)
         if process.returncode or not (root / 'ready').exists():
             raise RuntimeError(f'{name} failed ({process.returncode}): {process.stderr.decode(errors="replace")[-2000:]}')
         result = {'app': name, 'parse_ready_ms': (int((root / 'ready').read_text()) - started) / 1e6}
@@ -75,6 +85,9 @@ def main():
         return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path('target/release/rst'))
+    parser.add_argument('--app', type=Path, help='macOS: launch this rst.app through Launch Services')
+    parser.add_argument('--app-id', help='With --app, launch rst by this bundle identifier instead of path')
+    parser.add_argument('--reference-app', type=Path, help='macOS: optional reference rst.app')
     parser.add_argument('--reference-rst', type=Path, help='Optional saved pre-change rst binary')
     parser.add_argument('--alacritty', default=shutil.which('alacritty'))
     parser.add_argument('--user-config', action='store_true', help='Use existing terminal configs instead of matching fixture configs')
@@ -87,10 +100,25 @@ def main():
     args = parser.parse_args()
     if args.runs < 1 or args.warmup < 0 or not args.alacritty:
         parser.error('positive --runs, nonnegative --warmup and an Alacritty executable are required')
+    if args.app:
+        args.app = args.app.resolve()
+    if args.reference_app:
+        args.reference_app = args.reference_app.resolve()
     if args.fallback is None:
         args.fallback = ['0xProto Nerd Font Mono', 'JetBrainsMono Nerd Font',
                          'Symbols Nerd Font Mono', 'Menlo', 'Monaco', 'DejaVu Sans Mono']
-    binaries = {'rst': args.binary.resolve(), 'alacritty': Path(args.alacritty).resolve()}
+    if (args.app or args.reference_app) and sys.platform != 'darwin':
+        parser.error('--app and --reference-app require macOS')
+    if args.app_id and not args.app:
+        parser.error('--app-id requires --app')
+    if args.reference_app and not args.app:
+        parser.error('--reference-app requires --app')
+    if args.app and args.reference_rst:
+        parser.error('use --reference-app with --app, not --reference-rst')
+    binaries = {'rst': (args.app / 'Contents/MacOS/rst' if args.app else args.binary).resolve(),
+                'alacritty': Path(args.alacritty).resolve()}
+    if args.reference_app:
+        binaries['rst-before'] = (args.reference_app / 'Contents/MacOS/rst').resolve()
     if args.reference_rst:
         binaries['rst-before'] = args.reference_rst.resolve()
     fingerprints = {name: hashlib.sha256(binary.read_bytes()).hexdigest() for name, binary in binaries.items()}
@@ -108,7 +136,7 @@ def main():
                 result['run'] = index - args.warmup
                 results.append(result)
     medians = {name: statistics.median(r['parse_ready_ms'] for r in results if r['app'] == name) for name in binaries}
-    report = {'schema': 1, 'platform': sys.platform, 'user_config': args.user_config, 'font_family': None if args.user_config else args.font_family,
+    report = {'schema': 1, 'platform': sys.platform, 'launch_services': bool(args.app), 'launch_bundle_id': args.app_id, 'user_config': args.user_config, 'font_family': None if args.user_config else args.font_family,
               'font_size': None if args.user_config else args.font_size,
               'fallback': None if args.user_config else args.fallback, 'warmup_runs': args.warmup,
               'binary_sha256': fingerprints, 'median_parse_ready_ms': medians, 'runs': results}

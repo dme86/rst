@@ -11,12 +11,14 @@ case "$profile" in
   *) echo "Usage: $0 [debug|release]" >&2; exit 2 ;;
 esac
 binary="$root/target/$profile/rst"
-app="$root/target/$profile/rst.app"
+case "$profile" in debug) name='rst Debug';; release) name='rst Preview';; esac
+app="$root/target/$profile/$name.app"
 icon="$root/assets/logo.png"
 if [ ! -f "$binary" ] || [ ! -f "$icon" ]; then
   echo "rst: missing built binary or assets/logo.png" >&2
   exit 1
 fi
+sh "$root/scripts/migrate-macos-bundles.sh" "$root"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/rst"
 chmod 755 "$app/Contents/MacOS/rst"
@@ -37,11 +39,6 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/rst.icns"
 # Preserve the exact README icon in the bundle as well. The application
 # also embeds it at compile time for its live Dock/Cmd-Tab icon.
 cp "$icon" "$app/Contents/Resources/logo.png"
-touch "$app"
-# macOS caches icon metadata by bundle identity. Explicitly re-register
-# the updated bundle; avoid globally clearing caches or restarting Dock.
-lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [ -x "$lsregister" ]; then
-  "$lsregister" -f "$app" >/dev/null 2>&1 || true
-fi
+# Give previews/debug builds a distinct identity before registering them.
+sh "$root/scripts/macos-bundle-identity.sh" "$app" "$profile"
 echo "rst: packaged $app with assets/logo.png"

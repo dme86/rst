@@ -12,7 +12,7 @@ build: ## Build the debug binary
 
 ifeq ($(UNAME_S),Darwin)
 run: macos-app ## Build and launch the native macOS app with Dock icon
-	open -n "$(CURDIR)/target/debug/rst.app"
+	open -n "$(CURDIR)/target/debug/rst Debug.app"
 else
 run: build ## Build and run the Linux/Wayland binary
 	./target/debug/rst
@@ -24,19 +24,19 @@ run-cli: build ## Run the binary directly, keeping console logs attached
 release: ## Build an optimized binary
 	$(CARGO) build --release
 
-macos-app: build ## Package target/debug/rst.app with icon (macOS only)
+macos-app: build ## Package target/debug/rst Debug.app with icon (macOS only)
 	sh ./scripts/package-macos.sh debug
 
-macos-release: release ## Package target/release/rst.app with icon (macOS only)
+macos-release: release ## Package target/release/rst Preview.app with icon (macOS only)
 	sh ./scripts/package-macos.sh release
 
 install-macos: macos-release ## Install the native app into ~/Applications (macOS)
 	@mkdir -p "$(HOME)/Applications"
-	@rm -rf "$(HOME)/Applications/rst.app"
-	cp -R ./target/release/rst.app "$(HOME)/Applications/rst.app"
-	@touch "$(HOME)/Applications/rst.app"
 	@lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"; \
-	  if [ -x "$$lsregister" ]; then "$$lsregister" -f "$(HOME)/Applications/rst.app" >/dev/null 2>&1 || true; fi
+	  if [ -x "$$lsregister" ] && [ -d "$(HOME)/Applications/rst.app" ]; then "$$lsregister" -u "$(HOME)/Applications/rst.app" >/dev/null 2>&1 || true; fi
+	@rm -rf "$(HOME)/Applications/rst.app"
+	cp -R "./target/release/rst Preview.app" "$(HOME)/Applications/rst.app"
+	@sh ./scripts/macos-bundle-identity.sh "$(HOME)/Applications/rst.app" installed
 
 test: ## Run unit tests locally (no GitHub Actions)
 	$(CARGO) test
@@ -78,3 +78,7 @@ benchmark-parser: ## Measure parser throughput without a window
 .PHONY: benchmark-startup
 benchmark-startup: release ## Compare startup with Alacritty (Python 3, native desktop)
 	python3 scripts/benchmark-startup.py
+
+.PHONY: test-macos-packaging
+test-macos-packaging: release ## Check bundle identities and local signatures (macOS, Python 3)
+	python3 scripts/test-macos-packaging.py
