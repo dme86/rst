@@ -117,6 +117,7 @@ pub struct Renderer {
     // Bottom edge of a regular lowercase glyph, relative to a grid row.
     text_ink_bottom: i32,
     cursor_vertical: (usize, usize),
+    ui_text_pixels: Vec<u32>,
 }
 
 /// Font-independent powerline wedge; all writes are clipped by rect.
@@ -234,6 +235,7 @@ impl Renderer {
             ascent,
             text_ink_bottom,
             cursor_vertical,
+            ui_text_pixels: Vec::new(),
         })
     }
 
@@ -757,25 +759,25 @@ impl Renderer {
                     rect(pixels, width, height, seam_x + offset, top + 3 + row, 1, 1, ink);
                 }
             }
-            self.draw_ui_text(
+            self.draw_bar_text(
                 pixels, width, height,
-                x.saturating_add(self.cell_width), top.saturating_add(3),
+                x.saturating_add(self.cell_width), top.saturating_add(3), bar_h.saturating_sub(5),
                 &label, ink, available, screen,
             );
             if config.close_buttons && slot_columns >= 7 {
                 let close_x = x.saturating_add(
                     (slot_columns - 2).saturating_mul(self.cell_width),
                 );
-                self.draw_ui_text(pixels, width, height,
-                    close_x, top.saturating_add(3), "×", ink, 1, screen);
+                self.draw_bar_text(pixels, width, height,
+                    close_x, top.saturating_add(3), bar_h.saturating_sub(5), "×", ink, 1, screen);
             }
             tab_column += slot_columns;
         }
         let plus_column = tab_column;
         if plus_column + 1 < tab_columns {
             let plus_x = (plus_column - 1) * self.cell_width;
-            self.draw_ui_text(pixels, width, height,
-                plus_x, top.saturating_add(3), "+", accent, 1, screen);
+            self.draw_bar_text(pixels, width, height,
+                plus_x, top.saturating_add(3), bar_h.saturating_sub(5), "+", accent, 1, screen);
         }
         if let Some(status) = status {
             let mut column = tab_columns;
@@ -799,8 +801,8 @@ impl Renderer {
                     rect(pixels, width, height, x, top + 3,
                         count * self.cell_width, bar_h.saturating_sub(5), fill);
                 }
-                self.draw_ui_text(pixels, width, height, x + 2 * self.cell_width,
-                    top + 3, part, foreground, count - 3, screen);
+                self.draw_bar_text(pixels, width, height, x + 2 * self.cell_width,
+                    top + 3, bar_h.saturating_sub(5), part, foreground, count - 3, screen);
                 column += count;
             }
         }
@@ -1095,6 +1097,45 @@ impl Renderer {
             text_x, text_y.saturating_add(self.cell_height + 2),
             &notice.detail, sub_ink, max_cols, screen,
         );
+    }
+
+    /// Center the rendered ink, including fallback glyphs, on the arrow's
+    /// midpoint. Font ascenders and line leading are not optical bounds.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_bar_text(
+        &mut self, pixels: &mut [u32], width: usize, height: usize,
+        x: usize, y: usize, segment_height: usize, value: &str, color: u32,
+        columns: usize, screen: &Screen,
+    ) {
+        if width == 0 || x >= width || y >= height || segment_height == 0 || columns == 0 { return; }
+        let scratch_width = columns.saturating_mul(self.cell_width).min(width - x);
+        let Some(length) = scratch_width.checked_mul(self.cell_height) else { return; };
+        if length == 0 { return; }
+        // Reuse one small coverage buffer for all tab and status labels.
+        let mut scratch = std::mem::take(&mut self.ui_text_pixels);
+        scratch.resize(length, 0);
+        scratch.fill(0);
+        self.draw_ui_text(&mut scratch, scratch_width, self.cell_height,
+            0, 0, value, 0xffffff, columns, screen);
+        let first = scratch.iter().position(|pixel| pixel & 0xff > 12);
+        let last = scratch.iter().rposition(|pixel| pixel & 0xff > 12);
+        if let (Some(first), Some(last)) = (first, last) {
+            let ink_top = first / scratch_width;
+            let ink_height = last / scratch_width - ink_top + 1;
+            let visible_height = ink_height.min(segment_height);
+            let source_top = ink_top + ink_height.saturating_sub(segment_height) / 2;
+            let target_top = y.saturating_add(segment_height.saturating_sub(ink_height) / 2);
+            for row in 0..visible_height.min(height.saturating_sub(target_top)) {
+                for column in 0..scratch_width {
+                    let alpha = (scratch[(source_top + row) * scratch_width + column] & 0xff) as u8;
+                    let target = (target_top + row) * width + x + column;
+                    if alpha != 0 && target < pixels.len() {
+                        pixels[target] = blend(color, pixels[target], alpha);
+                    }
+                }
+            }
+        }
+        self.ui_text_pixels = scratch;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2721,6 +2762,37 @@ mod tests {
         assert!(pixels.contains(&term.screen.palette.selection));
     }
 
+
+    #[test]
+    fn bar_labels_center_visible_ink_for_fallback_fonts_and_display_scales() {
+        let config: crate::config::Config = toml::from_str(include_str!("../config/default.toml")).unwrap();
+        for family in [&config.font.family, "Menlo", "Monaco", "rst-missing-font-test"] {
+            let mut font = config.font.clone();
+            font.family = family.into();
+            for scale in [1.0, 1.5, 2.0] {
+                let mut renderer = Renderer::new(&font, 0, scale).unwrap();
+                let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+                let terminal = crate::terminal::Terminal::new(30, 4, 0, palette);
+                let width = renderer.cell_width * 30;
+                let height = renderer.cell_height * 4;
+                let segment_height = tabs::bar_height(renderer.cell_height, true) - 5;
+                for top in [3, height - segment_height - 3] {
+                    for label in ["1  fish", "12:34", "MAC05418.local", "+", "×", "Ägj界"] {
+                        let mut pixels = vec![0x222222; width * height];
+                        renderer.draw_bar_text(&mut pixels, width, height, 0, top,
+                            segment_height, label, 0xffffff, 24, &terminal.screen);
+                        let first = pixels.iter().position(|pixel| *pixel != 0x222222).unwrap() / width;
+                        let last = pixels.iter().rposition(|pixel| *pixel != 0x222222).unwrap() / width;
+                        assert!(first >= top && last < top + segment_height);
+                        let above = first - top;
+                        let below = top + segment_height - 1 - last;
+                        assert!(above.abs_diff(below) <= 1,
+                            "font {family}, scale {scale}, label {label}: top {above}, bottom {below}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn powerline_status_is_clipped_and_stays_outside_terminal_cells() {
