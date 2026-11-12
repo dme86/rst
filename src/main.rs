@@ -326,8 +326,7 @@ impl App {
                 let cwd = state.directories.iter().find(|dir| dir.id == id)
                     .map(|dir| dir.cwd.as_str()).filter(|cwd| std::path::Path::new(cwd).is_dir());
                 let next = (|| -> Result<StoredSession> {
-                    let mut terminal = configured_terminal(&self.config, self.config.window.columns, self.config.window.rows)?;
-                    terminal.screen.cwd = cwd.map(str::to_owned);
+                    let terminal = configured_terminal(&self.config, self.config.window.columns, self.config.window.rows, cwd)?;
                     let pty = PtySession::start_in_dir(id, self.config.window.columns, self.config.window.rows,
                         &self.config.terminal, self.proxy.clone(), cwd)?;
                     Ok(StoredSession { id, terminal, pty, unread: false })
@@ -393,7 +392,7 @@ impl App {
         }
         let new_id = self.next_session_id;
         let (cols, rows) = self.grid_size(self.content_rect());
-        let next_terminal = match configured_terminal(&self.config, cols, rows) {
+        let next_terminal = match configured_terminal(&self.config, cols, rows, None) {
             Ok(terminal) => terminal,
             Err(err) => {
                 self.notify(format!("Cannot initialize tab: {err}"));
@@ -443,10 +442,10 @@ impl App {
         }
         let rect = rects.iter().find(|(id, _)| *id == new_id).expect("new split pane").1;
         let (cols, rows) = self.grid_size(rect);
-        let next_terminal = match configured_terminal(&self.config, cols, rows) {
+        let cwd = self.terminal.screen.cwd.as_deref().filter(|cwd| std::path::Path::new(cwd).is_dir());
+        let next_terminal = match configured_terminal(&self.config, cols, rows, cwd) {
             Ok(terminal) => terminal, Err(err) => { self.notify(format!("Cannot initialize split: {err}")); return; }
         };
-        let cwd = self.terminal.screen.cwd.as_deref().filter(|cwd| std::path::Path::new(cwd).is_dir());
         let next_pty = match PtySession::start_in_dir(new_id, cols, rows, &self.config.terminal, self.proxy.clone(), cwd) {
             Ok(pty) => pty, Err(err) => { self.notify(format!("Cannot start split shell: {err}")); return; }
         };
@@ -1782,9 +1781,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-fn configured_terminal(config: &Config, cols: usize, rows: usize) -> Result<Terminal> {
+fn configured_terminal(config: &Config, cols: usize, rows: usize, cwd: Option<&str>) -> Result<Terminal> {
     let palette = Palette::try_from(&config.colors)?;
     let mut terminal = Terminal::new(cols, rows, config.scrollback.lines, palette);
+    terminal.screen.cwd = pty::initial_directory(cwd);
     terminal.screen.osc52_write_allowed =
         config.clipboard.enabled && config.clipboard.osc52_write;
     terminal.screen.command_capture = CommandCapture::with_url_history(
@@ -1869,10 +1869,9 @@ fn main() -> Result<()> {
             &config.terminal, proxy.clone(), initial_cwd,
         )?
     };
-    let mut terminal = configured_terminal(
-        &config, config.window.columns, config.window.rows,
+    let terminal = configured_terminal(
+        &config, config.window.columns, config.window.rows, initial_cwd,
     )?;
-    terminal.screen.cwd = initial_cwd.map(str::to_owned);
     let original_font_size = config.font.size;
     let config_blink_ms = config.cursor.blink_interval_ms;
     let shell_program = config.terminal.shell_program();
@@ -1935,6 +1934,33 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod keyboard_tests {
     use super::*;
+
+    #[test]
+    fn new_tab_label_and_width_are_stable_before_first_shell_prompt() {
+        let config: Config = toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let directory = std::env::current_dir().unwrap();
+        let directory = directory.to_str().unwrap();
+        let mut terminal = configured_terminal(&config, 80, 24, Some(directory)).unwrap();
+        let display = |screen: &crate::terminal::Screen| tabs::TabDisplay {
+            title: tab_naming::label_with_process(None, screen.cwd.as_deref(),
+                screen.foreground_program.as_deref(), &screen.title,
+                screen.command_capture.running(), "fish", "smart", Some(directory), 13),
+            active: true, unread: false,
+        };
+        let before = display(&terminal.screen);
+        assert_eq!(before.title, "~");
+        let before_layout = tabs::BarLayout::for_items(&[before], 0, 100, true, true);
+        terminal.advance(b"\x1b]0;fish ~\x07\x1b]133;A\x07");
+        // OSC 7 confirming the already-known directory must not resize the tab.
+        let encoded = directory.bytes().map(|byte| if byte == b'/' { "/".into() } else { format!("%{byte:02X}") }).collect::<String>();
+        terminal.advance(format!("\x1b]7;file://localhost{encoded}\x07").as_bytes());
+        let after = display(&terminal.screen);
+        assert_eq!(after.title, "~");
+        assert_eq!(tabs::BarLayout::for_items(&[after], 0, 100, true, true), before_layout);
+        // Startup metadata must remain provisional: subsequent cd still updates it.
+        terminal.advance(b"\x1b]7;file://localhost/\x07");
+        assert_eq!(display(&terminal.screen).title, "/");
+    }
 
     #[test]
     fn cursor_blink_steps_only_after_deadline() {

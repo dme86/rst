@@ -51,6 +51,19 @@ pub struct PtySession {
     foreground_name: Option<String>,
 }
 
+/// Seed tab metadata with the same directory passed to the PTY, before the
+/// shell has emitted its first OSC 7 update. Never guess from the active tab.
+pub fn initial_directory(cwd: Option<&str>) -> Option<String> {
+    starting_directory(cwd, std::env::var("HOME").ok().as_deref())
+}
+
+fn starting_directory(cwd: Option<&str>, home: Option<&str>) -> Option<String> {
+    let valid = |path: &&str| std::path::Path::new(path).is_absolute()
+        && std::path::Path::new(path).is_dir()
+        && !path.chars().any(char::is_control);
+    cwd.filter(valid).or_else(|| home.filter(valid)).map(str::to_owned)
+}
+
 fn shell_command(config: &crate::config::TerminalConfig, cwd: Option<&str>, argv: Option<&[String]>) -> CommandBuilder {
     let shell = config.shell_program();
     let (program, arguments): (&str, &[String]) = match argv.and_then(|args| args.split_first()) {
@@ -59,7 +72,7 @@ fn shell_command(config: &crate::config::TerminalConfig, cwd: Option<&str>, argv
     };
     let mut command = CommandBuilder::new(program);
     for arg in arguments { command.arg(arg); }
-    if let Some(cwd) = cwd { command.cwd(cwd); }
+    if let Some(cwd) = initial_directory(cwd) { command.cwd(cwd); }
     command.env("TERM", &config.term);
     if argv.is_none() { command.env("SHELL", &shell); }
     command.env("COLORTERM", "truecolor");
@@ -248,6 +261,19 @@ mod tests {
 #[cfg(test)]
 mod shell_tests {
     use super::*;
+    #[test]
+    fn startup_directory_is_known_before_shell_metadata() {
+        let root = std::env::temp_dir();
+        let home = root.to_str().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let cwd = cwd.to_str().unwrap();
+        assert_eq!(starting_directory(None, Some(home)).as_deref(), Some(home));
+        assert_eq!(starting_directory(Some(cwd), Some(home)).as_deref(), Some(cwd));
+        assert_eq!(starting_directory(Some("relative"), Some(home)).as_deref(), Some(home));
+        assert_eq!(starting_directory(Some("/nonexistent-rst-start-directory"), Some(home)).as_deref(), Some(home));
+        assert_eq!(starting_directory(None, None), None);
+    }
+
     #[test]
     fn configured_shell_arguments_and_explicit_commands_are_independent() {
         let config = crate::config::TerminalConfig { term: "xterm-256color".into(),
