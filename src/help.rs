@@ -33,7 +33,7 @@ pub fn lines(macos: bool) -> Vec<String> {
         "Splits (up to 8 independent shells per tab)".into(),
         format!("  Split left / right             {}", if macos { "Cmd+D" } else { "Ctrl+Shift+D" }),
         format!("  Split top / bottom             {}", if macos { "Cmd+Shift+D" } else { "Ctrl+Shift+E" }),
-        format!("  Focus neighboring pane         {}", if macos { "Cmd+Alt+Arrow" } else { "Ctrl+Shift+Arrow" }),
+        format!("  Focus neighboring pane         {}", if macos { "Cmd+Shift+Arrow (also Cmd+Alt+Arrow)" } else { "Ctrl+Shift+Arrow" }),
         format!("  Full pane / restore layout     {}", if macos { "Cmd+Shift+F" } else { "Ctrl+Shift+F" }),
         "  Collapsed pane edges           Click an edge; F shortcut restores".into(),
         format!("  Close focused pane             {close_tab}"),

@@ -6,6 +6,8 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub window: WindowConfig,
+    #[serde(default)]
+    pub session: SessionConfig,
     pub font: FontConfig,
     pub cursor: CursorConfig,
     pub scrollback: ScrollbackConfig,
@@ -24,9 +26,19 @@ pub struct Config {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct WindowConfig {
+    #[serde(default = "default_decorations")]
+    pub decorations: bool,
     pub columns: usize,
     pub rows: usize,
     pub padding: u32,
+}
+
+fn default_decorations() -> bool { true }
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    pub restore: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -261,6 +273,22 @@ mod tests {
         value.as_table_mut().unwrap().remove("url_picker");
         let legacy: Config = value.try_into().unwrap();
         assert_eq!(legacy.url_picker.recent_outputs, 20);
+    }
+
+    #[test]
+    fn workspace_and_decorations_options_keep_legacy_defaults() {
+        let mut value: toml::Value = toml::from_str(include_str!("../config/default.toml")).unwrap();
+        value.as_table_mut().unwrap().remove("session");
+        value["window"].as_table_mut().unwrap().remove("decorations");
+        let legacy: Config = value.clone().try_into().unwrap();
+        assert!(legacy.window.decorations);
+        assert!(!legacy.session.restore);
+        value["window"].as_table_mut().unwrap().insert("decorations".into(), toml::Value::Boolean(false));
+        value.as_table_mut().unwrap().insert("session".into(), toml::Value::Table(toml::map::Map::from_iter([
+            ("restore".into(), toml::Value::Boolean(true))])));
+        let enabled: Config = value.try_into().unwrap();
+        assert!(!enabled.window.decorations);
+        assert!(enabled.session.restore);
     }
 
     #[test]

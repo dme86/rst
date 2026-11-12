@@ -15,6 +15,7 @@ mod pty;
 mod pty_input;
 mod profile;
 mod process_name;
+mod session;
 mod render;
 mod selection;
 mod shell_integration;
@@ -97,6 +98,8 @@ struct App {
     next_text_blink: Instant,
     next_process_probe: Instant,
     tab_status: tabs::TabStatus,
+    session_cache: Option<session::Snapshot>,
+    session_enabled: bool,
     focus: FocusTracker,
     bell_limiter: BellLimiter,
     bell_flash_until: Option<Instant>,
@@ -111,7 +114,7 @@ impl App {
     /// A PTY with a running command or an alternate-screen TUI can have a
     /// foreground job other than its interactive shell. Idle tabs never
     /// cause process queries or extra wakeups.
-    fn tab_may_have_foreground_job(screen: &terminal::Screen) -> bool {
+    fn tab_may_have_foreground_job(screen: &crate::terminal::Screen) -> bool {
         screen.command_capture.running() || screen.in_alternate_screen()
     }
 
@@ -281,6 +284,64 @@ impl App {
             window.request_redraw();
         }
         self.update_ime_cursor_area();
+    }
+
+    fn save_session(&mut self) {
+        if !self.session_enabled { return; }
+        let Some(path) = session::path() else { return; };
+        let mut directories = Vec::new();
+        let mut add = |id, screen: &crate::terminal::Screen| {
+            if let Some(cwd) = screen.cwd.as_ref().filter(|cwd| std::path::Path::new(cwd).is_absolute()
+                && cwd.len() <= 4096 && !cwd.chars().any(char::is_control)) {
+                directories.push(session::Directory { id, cwd: cwd.clone() });
+            }
+        };
+        add(self.active_session_id, &self.terminal.screen);
+        for stored in &self.inactive_sessions { add(stored.id, &stored.terminal.screen); }
+        directories.sort_by_key(|dir| dir.id);
+        let snapshot = session::Snapshot { version: 1, active: self.active_session_id,
+            tabs: self.tab_order.clone(), layouts: self.layouts.iter().map(|(id, layout)|
+                (id.to_string(), layout.clone())).collect(), directories };
+        if self.session_cache.as_ref() == Some(&snapshot) { return; }
+        let result = (|| -> Result<()> {
+            let data = toml::to_string(&snapshot)?;
+            session::save(&path, &data)?;
+            self.session_cache = Some(snapshot);
+            Ok(())
+        })();
+        if let Err(err) = result {
+            eprintln!("rst: cannot save session: {err:#}");
+            self.session_enabled = false;
+        }
+    }
+
+    fn restore_session(&mut self, state: session::Snapshot) -> Result<()> {
+        // Reserve all restored IDs even if spawning a shell fails, so delayed
+        // events from a terminated partial restore cannot target a future pane.
+        self.next_session_id = state.layouts.values().flat_map(|layout| layout.ids()).max().unwrap() + 1;
+        let mut sessions: Vec<StoredSession> = Vec::new();
+        for layout in state.layouts.values() {
+            for id in layout.ids() {
+                if id == self.active_session_id { continue; }
+                let cwd = state.directories.iter().find(|dir| dir.id == id)
+                    .map(|dir| dir.cwd.as_str()).filter(|cwd| std::path::Path::new(cwd).is_dir());
+                let next = (|| -> Result<StoredSession> {
+                    let mut terminal = configured_terminal(&self.config, self.config.window.columns, self.config.window.rows)?;
+                    terminal.screen.cwd = cwd.map(str::to_owned);
+                    let pty = PtySession::start_in_dir(id, self.config.window.columns, self.config.window.rows,
+                        &self.config.terminal.term, self.proxy.clone(), cwd)?;
+                    Ok(StoredSession { id, terminal, pty, unread: false })
+                })();
+                match next {
+                    Ok(stored) => sessions.push(stored),
+                    Err(err) => { for stored in &mut sessions { stored.pty.terminate(); } return Err(err); }
+                }
+            }
+        }
+        self.inactive_sessions = sessions;
+        self.tab_order = state.tabs;
+        self.layouts = state.layouts.into_iter().map(|(id, layout)| (id.parse().expect("validated tab ID"), layout)).collect();
+        Ok(())
     }
 
     fn switch_tab(&mut self, target_id: u64) {
@@ -1117,6 +1178,7 @@ fn cursor_blink_schedule(
 
 impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.save_session();
         if let Some(profile) = &mut self.profile { profile.wait(self.native_cursor.as_ref().and_then(|layer| layer.phase())); }
         let now = Instant::now();
 
@@ -1242,6 +1304,7 @@ impl ApplicationHandler<UserEvent> for App {
             } else { 0.0 };
         let attributes = Window::default_attributes()
             .with_title(&self.terminal.screen.title)
+            .with_decorations(self.config.window.decorations)
             .with_inner_size(LogicalSize::new(logical_width, logical_height));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -1295,6 +1358,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match event {
             WindowEvent::CloseRequested => {
+                self.save_session();
                 self.terminate_all_tabs();
                 event_loop.exit();
             },
@@ -1437,7 +1501,11 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                             Some(tabs::TabAction::New) => self.new_tab(),
-                            None => {}
+                            None => {
+                                if !self.config.window.decorations {
+                                    if let Some(window) = &self.window { let _ = window.drag_window(); }
+                                }
+                            }
                         }
                     }
                     // Never forward tab-bar mouse input to a child TUI.
@@ -1763,20 +1831,43 @@ fn main() -> Result<()> {
     let context = Context::new(event_loop.owned_display_handle())
         .map_err(|err| anyhow::anyhow!("cannot initialize display: {err}"))?;
     let proxy = event_loop.create_proxy();
+    let mut session_enabled = config.session.restore && launch_command.is_none();
+    let saved_session = if session_enabled {
+        match session::path().map(|path| session::load(&path, config.tabs.max_tabs)).transpose() {
+            Ok(state) => state.flatten(),
+            Err(err) => {
+                eprintln!("rst: cannot restore session: {err:#}");
+                session_enabled = false;
+                None
+            }
+        }
+    } else { None };
+    let saved_session = saved_session.filter(|state| {
+        if !config.tabs.enabled && state.tabs.len() > 1 {
+            eprintln!("rst: enable tabs to restore the saved multi-tab workspace");
+            session_enabled = false;
+            false
+        } else { true }
+    });
+    let initial_id = saved_session.as_ref().map_or(1, |state| state.active);
+    let initial_cwd = saved_session.as_ref().and_then(|state| state.directories.iter()
+        .find(|dir| dir.id == initial_id)).map(|dir| dir.cwd.as_str())
+        .filter(|cwd| std::path::Path::new(cwd).is_dir());
     let pty = if let Some(command) = launch_command.as_deref() {
         PtySession::start_with_command(
             1, config.window.columns, config.window.rows,
             &config.terminal.term, proxy.clone(), command,
         )?
     } else {
-        PtySession::start(
-            1, config.window.columns, config.window.rows,
-            &config.terminal.term, proxy.clone(),
+        PtySession::start_in_dir(
+            initial_id, config.window.columns, config.window.rows,
+            &config.terminal.term, proxy.clone(), initial_cwd,
         )?
     };
-    let terminal = configured_terminal(
+    let mut terminal = configured_terminal(
         &config, config.window.columns, config.window.rows,
     )?;
+    terminal.screen.cwd = initial_cwd.map(str::to_owned);
     let original_font_size = config.font.size;
     let config_blink_ms = config.cursor.blink_interval_ms;
     let mut app = App {
@@ -1785,10 +1876,10 @@ fn main() -> Result<()> {
         original_font_size,
         terminal,
         pty,
-        active_session_id: 1,
-        next_session_id: 2,
-        tab_order: vec![1],
-        layouts: std::collections::BTreeMap::from([(1, panes::Layout::new(1))]),
+        active_session_id: initial_id,
+        next_session_id: initial_id + 1,
+        tab_order: vec![initial_id],
+        layouts: std::collections::BTreeMap::from([(initial_id, panes::Layout::new(initial_id))]),
         pane_buffer: Vec::new(),
         inactive_sessions: Vec::new(),
         proxy,
@@ -1813,6 +1904,8 @@ fn main() -> Result<()> {
         next_text_blink: Instant::now() + Duration::from_millis(800),
         next_process_probe: Instant::now(),
         tab_status: tabs::TabStatus::new(),
+        session_cache: None,
+        session_enabled,
         focus: FocusTracker::default(),
         bell_limiter: BellLimiter::default(),
         bell_flash_until: None,
@@ -1822,6 +1915,13 @@ fn main() -> Result<()> {
         toast: None,
         next_toast_frame: None,
     };
+    if let Some(state) = saved_session {
+        if let Err(err) = app.restore_session(state) {
+            eprintln!("rst: cannot restore session: {err:#}");
+            // Preserve a broken/newer snapshot for inspection instead of overwriting it.
+            app.session_enabled = false;
+        }
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
 }

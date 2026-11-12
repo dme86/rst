@@ -1,5 +1,5 @@
 //! Per-tab split trees and physical geometry, independent of PTYs/window APIs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Axis {
     Vertical,
     Horizontal,
@@ -38,7 +38,7 @@ impl Rect {
 pub const MAX_PANES: usize = 8;
 pub const DIVIDER: usize = 2;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Node {
     Leaf(u64),
     Split {
@@ -48,7 +48,7 @@ pub enum Node {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     pub root: Node,
     pub focused: u64,
@@ -412,7 +412,7 @@ pub fn shortcut(
     } else {
         M::CONTROL | M::SHIFT
     };
-    if mods == navigation {
+    if mods == navigation || (macos && mods == (M::SUPER | M::SHIFT)) {
         return match key {
             Key::Named(NamedKey::ArrowLeft) => Some(Action::Focus(Direction::Left)),
             Key::Named(NamedKey::ArrowRight) => Some(Action::Focus(Direction::Right)),
@@ -428,6 +428,23 @@ pub fn shortcut(
 mod shortcut_tests {
     use super::*;
     use winit::keyboard::{Key, ModifiersState as M, NamedKey};
+    #[test]
+    fn command_shift_arrows_focus_all_directions_without_extra_modifiers() {
+        for (key, direction) in [
+            (NamedKey::ArrowLeft, Direction::Left),
+            (NamedKey::ArrowRight, Direction::Right),
+            (NamedKey::ArrowUp, Direction::Up),
+            (NamedKey::ArrowDown, Direction::Down),
+        ] {
+            let key = Key::Named(key);
+            assert_eq!(shortcut(&key, M::SUPER | M::SHIFT, true), Some(Action::Focus(direction)));
+            assert_eq!(shortcut(&key, M::SUPER | M::ALT, true), Some(Action::Focus(direction)));
+            assert_eq!(shortcut(&key, M::CONTROL | M::SHIFT, false), Some(Action::Focus(direction)));
+            assert_eq!(shortcut(&key, M::SUPER | M::SHIFT | M::ALT, true), None);
+            assert_eq!(shortcut(&key, M::SUPER | M::SHIFT, false), None);
+        }
+    }
+
     #[test]
     fn split_and_focus_shortcuts_require_exact_modifiers() {
         assert_eq!(

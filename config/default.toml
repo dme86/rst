@@ -2,6 +2,8 @@
 # Copy to ~/.config/rst/config.toml (or $XDG_CONFIG_HOME/rst/config.toml).
 
 [window]
+# Native title bar / window border. The compositor may override this on Wayland.
+decorations = true
 columns = 96
 rows = 28
 # Small text inset; terminal applications' background colors still
@@ -88,3 +90,8 @@ palette = [
   "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af",
   "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8",
 ]
+
+[session]
+# Restore tabs, splits, focus and known working directories with fresh shells.
+# Does not replay commands, preserve programs or save scrollback.
+restore = false
