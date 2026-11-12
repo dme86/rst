@@ -85,6 +85,7 @@ struct App {
     window: Option<Arc<Window>>,
     surface: Option<Surface<OwnedDisplayHandle, Arc<Window>>>,
     renderer: Option<Renderer>,
+    font_loader: Option<std::thread::JoinHandle<Result<Renderer>>>,
     native_cursor: Option<cursor_layer::CursorLayer>,
     modifiers: ModifiersState,
     ime: ImeState,
@@ -1310,6 +1311,13 @@ impl ApplicationHandler<UserEvent> for App {
             config::StartupMode::Maximized => attributes.with_maximized(true),
             config::StartupMode::Fullscreen => attributes.with_fullscreen(Some(Fullscreen::Borderless(None))),
         };
+        // AppKit's zoom of an already visible window blocks startup for its
+        // resize animation. Maximize offscreen, then show the finished window.
+        // Keep native zoom state/restoration; no hand-written monitor geometry.
+        #[cfg(target_os = "macos")]
+        let attributes = if self.config.window.startup_mode == config::StartupMode::Maximized {
+            attributes.with_visible(false)
+        } else { attributes };
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -1322,15 +1330,21 @@ impl ApplicationHandler<UserEvent> for App {
         // binary was started with cargo run (no .app / Launch Services).
         #[cfg(target_os = "macos")]
         macos_icon::install();
-        let renderer =
-            match Renderer::new(&self.config.font, self.config.window.padding, window.scale_factor()) {
-                Ok(renderer) => renderer,
-                Err(err) => {
-                    eprintln!("rst: cannot initialize font: {err:#}");
-                    event_loop.exit();
-                    return;
-                }
-            };
+        // Font discovery and outline preparation run alongside AppKit/Wayland
+        // initialization. Only native window/surface work stays on this thread.
+        let mut renderer = match self.font_loader.take().expect("startup font worker").join()
+            .map_err(|_| anyhow::anyhow!("font loader panicked")).and_then(|result| result)
+        {
+            Ok(renderer) => renderer,
+            Err(err) => {
+                eprintln!("rst: cannot initialize font: {err:#}");
+                event_loop.exit();
+                return;
+            }
+        };
+        let scale = window.scale_factor();
+        renderer.set_font_size(self.config.font.size, scale);
+        renderer.padding = (self.config.window.padding as f64 * scale) as usize;
         let surface = match Surface::new(&self.context, window.clone()) {
             Ok(surface) => surface,
             Err(err) => {
@@ -1349,6 +1363,10 @@ impl ApplicationHandler<UserEvent> for App {
             window.set_ime_allowed(true);
         }
         self.resize_terminal();
+        #[cfg(target_os = "macos")]
+        if self.config.window.startup_mode == config::StartupMode::Maximized {
+            if let Some(window) = &self.window { window.set_visible(true); }
+        }
     }
 
     fn window_event(
@@ -1829,6 +1847,10 @@ fn main() -> Result<()> {
     };
     let profile = profile::Profile::from_env(process_started)?;
     let config = config::load()?;
+    let font_config = config.font.clone();
+    let font_padding = config.window.padding;
+    let font_loader = std::thread::Builder::new().name("rst-font-loader".into())
+        .spawn(move || Renderer::new(&font_config, font_padding, 1.0))?;
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     // softbuffer's platform error holds non-Send raw window handles.
@@ -1895,6 +1917,7 @@ fn main() -> Result<()> {
         window: None,
         surface: None,
         renderer: None,
+        font_loader: Some(font_loader),
         native_cursor: None,
         modifiers: ModifiersState::empty(),
         ime: ImeState::default(),

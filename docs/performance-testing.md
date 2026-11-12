@@ -282,3 +282,69 @@ Collapsed panes now occupy only 5 physical pixels each, drawn as low-contrast
 zigzag accordion folds without labels or a Restore button. The F shortcut restores the
 layout, and an edge can still be clicked to select that pane. No text shaping
 or foreground-process polling is added for these hints when the tab bar is off.
+
+## Startup comparison with Alacritty (2026-11-12)
+
+A dedicated short benchmark compares separate native processes, not new tabs:
+
+```sh
+# Save the old release before rebuilding to include it in the comparison:
+cp target/release/rst /tmp/rst-before
+make release
+python3 scripts/benchmark-startup.py --reference-rst /tmp/rst-before
+# Repeat using each application's existing configuration:
+python3 scripts/benchmark-startup.py --reference-rst /tmp/rst-before \
+  --user-config --output target/benchmarks/startup-user-config.json
+```
+
+Requires Python 3, Alacritty and a working desktop session. Each temporary window
+closes itself. The default fixture uses 96x28 cells, 0xProto Nerd Font at 16.5,
+and rst's default fallback list. `--font-family`, `--font-size` and repeated
+`--fallback` options change these settings. `--alacritty` selects an executable.
+`--user-config` reads existing application settings without editing them; the
+font/size options then do not apply, and window sizes may differ.
+
+The identical child writes a readiness prompt and a cursor-position query, then
+records when it receives the reply. This measures process spawn to a usable PTY
+parser, including Python fixture startup, rather than physical display
+presentation. rst additionally records its first submitted prompt frame through
+`RST_PROFILE`; no matching Alacritty frame metric is claimed. Interactive shell
+rc/theme work and Dock/Launch Services launch time are excluded. The test uses
+one unreported warmup per executable, five measured runs and alternating order;
+reports include all samples and binary hashes. These are warm-start comparisons,
+not cold-boot or first-launch measurements of a newly built binary.
+
+On the development Mac, with release builds and Alacritty 0.17.0:
+
+| Configuration | rst before | rst after | Alacritty |
+| --- | ---: | ---: | ---: |
+| Matching window/font settings, median spawn → PTY reply | 279 ms | 160 ms | 227 ms |
+| Existing local settings (rst maximized with tabs/status), same metric | 624 ms | 178 ms | 227 ms |
+
+Both rows use the final implementation and a saved pre-change release. First
+submitted prompt frame in the matching-settings run fell from 287 to 169 ms. Local-config comparisons deliberately keep
+each application's actual settings, so they are not equal-size renderer tests.
+Treat these measurements as local evidence, not general speed guarantees.
+
+Three changes address the measured startup costs:
+
+- Only the primary regular font expands glyph outlines initially. Fallback fonts
+  first check their character map and load outlines only for a glyph they can
+  actually supply. Font parsing failures stay cached; the fallback order,
+  original font bytes and collection indices remain intact for shaping.
+- Font discovery and preparation run on a startup worker while native window
+  setup and PTY initialization proceed. Native surface work stays on the UI
+  thread; metrics and padding are adjusted to the window's actual scale before
+  the first draw.
+- On macOS, a maximized window is created hidden and shown after initial layout.
+  This avoids AppKit's visible startup zoom animation while retaining native
+  maximize/restore behavior. Windowed, fullscreen and Wayland behavior are
+  unchanged.
+
+A local diagnostic measured about 93 ms for font discovery and 102 ms for eager
+regular-font parsing (including 43 ms for an unused secondary Nerd Font).
+Preparing fonts in parallel and avoiding that unused work removed most of the
+windowed delay. With the existing maximized configuration, preparing the window
+offscreen removed a further roughly 320 ms. Regression tests compare lazy/eager
+raster pixels for styled text, icons, ligatures and Unicode, and compare worker
+initialization against direct Retina-scale initialization.

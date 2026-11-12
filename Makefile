@@ -74,3 +74,7 @@ benchmark: release ## Measure real-window startup, idle CPU and PTY latency (Pyt
 
 benchmark-parser: ## Measure parser throughput without a window
 	$(CARGO) test --release parser_throughput_benchmark -- --ignored --nocapture
+
+.PHONY: benchmark-startup
+benchmark-startup: release ## Compare startup with Alacritty (Python 3, native desktop)
+	python3 scripts/benchmark-startup.py

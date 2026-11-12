@@ -25,32 +25,47 @@ struct Glyph {
     bitmap: Vec<u8>,
 }
 
-/// Pick a real bold/italic font face when the installed family provides it.
-/// If a family has no such face, the draw stage synthesizes the missing
-/// attribute rather than silently rendering a regular glyph.
-fn load_font_face(db: &Database, id: fontdb::ID) -> Option<(Font, FontBytes)> {
-    db.with_face_data(id, |data, index| {
-        let bytes: std::sync::Arc<[u8]> = data.into();
-        let font = Font::from_bytes(
-            bytes.clone(),
-            FontSettings {
-                collection_index: index,
-                ..FontSettings::default()
-            },
-        ).ok()?;
-        Some((font, FontBytes { bytes, face_index: index }))
+/// Retain a validated regular face without eagerly expanding its outlines.
+fn load_font_face(db: &Database, id: fontdb::ID) -> Option<(LazyFont, FontBytes)> {
+    db.with_face_data(id, |data, face_index| {
+        // Validate the table structure without expanding every glyph outline.
+        rustybuzz::ttf_parser::Face::parse(data, face_index).ok()?;
+        let source = FontBytes { bytes: data.into(), face_index };
+        Some((LazyFont { source: source.clone(), parsed: std::sync::OnceLock::new(), coverage: std::sync::OnceLock::new() }, source))
     }).flatten()
 }
 
-// Style faces are discovered at startup, but parsed only on first use.
-// Most shells initially draw regular text; eagerly parsing every variant
-// delays the first window for fonts that may never be used in that session.
+// Only the primary regular face is parsed at startup. Fallbacks and styles
+// expand their glyph outlines on first use; merely testing coverage must not
+// initialize a large Nerd Font that cannot even supply the requested glyph.
 struct LazyFont {
     source: FontBytes,
     parsed: std::sync::OnceLock<Option<Font>>,
+    coverage: std::sync::OnceLock<Option<HashSet<char>>>,
 }
 
 impl LazyFont {
+    fn has_glyph(&self, ch: char) -> bool {
+        if let Some(parsed) = self.parsed.get() {
+            return parsed.as_ref().is_some_and(|font| font.has_glyph(ch));
+        }
+        let covered = self.coverage.get_or_init(|| {
+            let face = rustybuzz::ttf_parser::Face::parse(&self.source.bytes, self.source.face_index).ok()?;
+            let mut characters = HashSet::new();
+            // Match fontdue's union of all cmap subtables, including symbol
+            // fonts. Cache negative coverage too, without parsing outlines.
+            for subtable in face.tables().cmap?.subtables {
+                subtable.codepoints(|codepoint| {
+                    if subtable.glyph_index(codepoint).is_some_and(|id| id.0 != 0) {
+                        if let Some(ch) = char::from_u32(codepoint) { characters.insert(ch); }
+                    }
+                });
+            }
+            Some(characters)
+        }).as_ref().is_some_and(|characters| characters.contains(&ch));
+        covered && self.font().is_some_and(|font| font.has_glyph(ch))
+    }
+
     fn font(&self) -> Option<&Font> {
         self.parsed.get_or_init(|| Font::from_bytes(
             self.source.bytes.clone(),
@@ -84,6 +99,7 @@ fn load_style_face(
     db.with_face_data(id, |data, face_index| LazyFont {
         source: FontBytes { bytes: data.into(), face_index },
         parsed: std::sync::OnceLock::new(),
+        coverage: std::sync::OnceLock::new(),
     })
 }
 
@@ -97,7 +113,7 @@ pub struct CursorPatch {
 }
 
 pub struct Renderer {
-    fonts: Vec<Font>,
+    fonts: Vec<LazyFont>,
     font_sources: Vec<FontBytes>,
     // For each regular fallback face: bold, italic, bold-italic variants.
     styled_fonts: Vec<[Option<LazyFont>; 3]>,
@@ -160,6 +176,7 @@ impl Renderer {
             if let Some((font, source)) = db.query(&query)
                 .filter(|id| seen_faces.insert(*id))
                 .and_then(|id| load_font_face(&db, id))
+                .filter(|(font, _)| !fonts.is_empty() || font.font().is_some())
             {
                 let family_query = [Family::Name(family)];
                 let variants = [
@@ -188,6 +205,7 @@ impl Renderer {
             if let Some((font, source)) = db.query(&query)
                 .filter(|id| seen_faces.insert(*id))
                 .and_then(|id| load_font_face(&db, id))
+                .filter(|(font, _)| !fonts.is_empty() || font.font().is_some())
             {
                 let family_query = [Family::Monospace];
                 let variants = [
@@ -209,8 +227,7 @@ impl Renderer {
             eprintln!("rst: available font chain: {}", loaded.join(" -> "));
         }
 
-        let primary = fonts
-            .first()
+        let primary = fonts.first().and_then(LazyFont::font)
             .context("no usable monospace font found; install Menlo or a Nerd Font")?;
         let font_size = (config.size as f64 * scale) as f32;
         let (cell_width, cell_height, ascent, text_ink_bottom) =
@@ -249,13 +266,13 @@ impl Renderer {
             return;
         }
         let (cell_width, cell_height, ascent, text_ink_bottom) =
-            font_cell_metrics(&self.fonts[0], pixel_size);
+            font_cell_metrics(self.fonts[0].font().expect("primary font initialized"), pixel_size);
         self.font_size = pixel_size;
         self.cell_width = cell_width;
         self.cell_height = cell_height;
         self.ascent = ascent;
         self.text_ink_bottom = text_ink_bottom;
-        self.cursor_vertical = cursor_vertical_metrics(&self.fonts[0], pixel_size, cell_height, ascent);
+        self.cursor_vertical = cursor_vertical_metrics(self.fonts[0].font().expect("primary font initialized"), pixel_size, cell_height, ascent);
         // Previously rasterized pixels belong to a different font size.
         // Keep parsed font faces and fallback order; only discard bitmaps.
         self.glyphs.clear();
@@ -347,7 +364,7 @@ impl Renderer {
             + (self.cell_height as i32 - self.font_size.ceil() as i32).max(0) / 2;
         // Borrow the font array and raster cache as disjoint fields.
         let face_font = if face.1 == 0 {
-            &self.fonts[face.0]
+            self.fonts[face.0].font().expect("selected usable face")
         } else {
             self.styled_fonts[face.0][face.1 as usize - 1]
                 .as_ref().and_then(LazyFont::font).expect("variant selected from available face")
@@ -513,7 +530,7 @@ impl Renderer {
             })
             .unwrap_or(0);
         let face = if variant == 0 {
-            &self.fonts[index]
+            self.fonts[index].font().expect("selected usable face")
         } else {
             self.styled_fonts[index][variant as usize - 1]
                 .as_ref().and_then(LazyFont::font)
@@ -2038,7 +2055,6 @@ fn blend(fg: u32, bg: u32, alpha: u8) -> u32 {
 mod tests {
     use super::*;
 
-
     fn test_screen() -> Screen {
         let config: crate::config::Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
@@ -2387,6 +2403,68 @@ mod tests {
     }
 
     #[test]
+    fn fallback_coverage_does_not_parse_unused_outlines_and_pixels_match_eager_loading() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return; };
+        assert!(renderer.fonts[0].parsed.get().is_some());
+        for font in renderer.fonts.iter().skip(1) {
+            assert!(font.parsed.get().is_none());
+            // Noncharacter is absent from ordinary fonts: probing it must not
+            // expand every Nerd Font outline just to find a missing glyph.
+            assert!(!font.has_glyph('\u{10ffff}'));
+            assert!(font.parsed.get().is_none());
+        }
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(40, 4, 0, palette);
+        terminal.advance("ASCII -> != fi \u{e0b0} \u{f07b}\r\n\x1b[1mBold\x1b[3m Italic\x1b[0m\r\nمرحبا é 界".as_bytes());
+        let width = renderer.cell_width * terminal.screen.cols;
+        let height = renderer.cell_height * terminal.screen.rows;
+        let mut lazy_pixels = vec![0; width * height];
+        renderer.draw(&mut lazy_pixels, width, height, &terminal.screen, None, None);
+        for font in &renderer.fonts { let _ = font.font(); }
+        for font in renderer.styled_fonts.iter().flatten().flatten() { let _ = font.font(); }
+        renderer.glyphs.clear();
+        renderer.indexed_glyphs.clear();
+        renderer.shape_cache.clear();
+        let mut eager_pixels = vec![0; width * height];
+        renderer.draw(&mut eager_pixels, width, height, &terminal.screen, None, None);
+        assert!(lazy_pixels == eager_pixels, "lazy loading must preserve glyph choice and raster pixels");
+        let invalid = LazyFont {
+            source: FontBytes { bytes: vec![1, 2, 3].into(), face_index: 0 },
+            parsed: std::sync::OnceLock::new(),
+            coverage: std::sync::OnceLock::new(),
+        };
+        assert!(!invalid.has_glyph('A'));
+        assert!(invalid.font().is_none());
+    }
+
+    #[test]
+    fn background_font_initialization_matches_native_retina_metrics_and_pixels() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let font = config.font.clone();
+        let padding = config.window.padding;
+        let Ok(mut prepared) = std::thread::spawn(move || Renderer::new(&font, padding, 1.0))
+            .join().unwrap() else { return; };
+        let mut native = Renderer::new(&config.font, padding, 2.0).unwrap();
+        prepared.set_font_size(config.font.size, 2.0);
+        prepared.padding = (padding as f64 * 2.0) as usize;
+        assert_eq!((prepared.cell_width, prepared.cell_height, prepared.padding),
+                   (native.cell_width, native.cell_height, native.padding));
+        let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+        let mut terminal = crate::terminal::Terminal::new(30, 3, 0, palette);
+        terminal.advance("Retina -> \u{e0b0} \x1b[1mBold\x1b[0m\r\n\x1b[3mItalic\x1b[0m é".as_bytes());
+        let width = prepared.cell_width * terminal.screen.cols + prepared.padding * 2;
+        let height = prepared.cell_height * terminal.screen.rows + prepared.padding * 2;
+        let mut prepared_pixels = vec![0; width * height];
+        let mut native_pixels = prepared_pixels.clone();
+        prepared.draw(&mut prepared_pixels, width, height, &terminal.screen, None, None);
+        native.draw(&mut native_pixels, width, height, &terminal.screen, None, None);
+        assert!(prepared_pixels == native_pixels, "background setup must preserve Retina rendering");
+    }
+
+    #[test]
     fn style_fonts_are_lazy_and_glyph_cache_stays_bounded() {
         let config: crate::config::Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
@@ -2689,7 +2767,7 @@ mod tests {
             return; // Some platform-specific system font formats may not parse.
         };
         assert_eq!(shaped.glyphs.len(), 1);
-        assert_eq!(shaped.glyphs[0].index, renderer.fonts[0].lookup_glyph_index('A'));
+        assert_eq!(shaped.glyphs[0].index, renderer.fonts[0].font().unwrap().lookup_glyph_index('A'));
     }
 
     #[test]
@@ -3092,7 +3170,8 @@ mod startup_benchmark {
         for _ in 0..5 {
             let start = std::time::Instant::now();
             let renderer = super::Renderer::new(&config.font, config.window.padding, 1.0).unwrap();
-            eprintln!("font startup: {:?}, {} regular faces", start.elapsed(), renderer.fonts.len());
+            eprintln!("font startup: {:?}, {} regular faces, {} parsed", start.elapsed(), renderer.fonts.len(),
+                renderer.fonts.iter().filter(|font| font.parsed.get().is_some()).count());
             std::hint::black_box(renderer);
         }
     }
