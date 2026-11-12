@@ -1721,9 +1721,9 @@ fn configured_terminal(config: &Config, cols: usize, rows: usize) -> Result<Term
 
 fn main() -> Result<()> {
     let process_started = Instant::now();
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new("--install-shell-integration"))
-    {
+    let mut args = std::env::args().skip(1);
+    let first_arg = args.next();
+    if first_arg.as_deref() == Some("--install-shell-integration") {
         let changes = shell_integration::install()?;
         if changes.is_empty() {
             println!("rst: shell integration already installed");
@@ -1733,6 +1733,15 @@ fn main() -> Result<()> {
         println!("rst: open a new rst window to activate shell integration");
         return Ok(());
     }
+    // -e is the convention used by Wayland launchers for Terminal=true desktop entries.
+    // Pass argv directly to the PTY; do not reinterpret it with a shell.
+    let launch_command = if matches!(first_arg.as_deref(), Some("-e" | "--execute")) {
+        let command: Vec<String> = args.collect();
+        anyhow::ensure!(!command.is_empty(), "rst: -e requires a program");
+        Some(command)
+    } else {
+        None
+    };
     let profile = profile::Profile::from_env(process_started)?;
     let config = config::load()?;
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
@@ -1742,10 +1751,17 @@ fn main() -> Result<()> {
     let context = Context::new(event_loop.owned_display_handle())
         .map_err(|err| anyhow::anyhow!("cannot initialize display: {err}"))?;
     let proxy = event_loop.create_proxy();
-    let pty = PtySession::start(
-        1, config.window.columns, config.window.rows,
-        &config.terminal.term, proxy.clone(),
-    )?;
+    let pty = if let Some(command) = launch_command.as_deref() {
+        PtySession::start_with_command(
+            1, config.window.columns, config.window.rows,
+            &config.terminal.term, proxy.clone(), command,
+        )?
+    } else {
+        PtySession::start(
+            1, config.window.columns, config.window.rows,
+            &config.terminal.term, proxy.clone(),
+        )?
+    };
     let terminal = configured_terminal(
         &config, config.window.columns, config.window.rows,
     )?;
