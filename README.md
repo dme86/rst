@@ -24,7 +24,6 @@ folds; press the same shortcut again to restore the layout.
 
 ![Two tabs, with the active tab split into two panes](assets/tabs-and-splits.png)
 
-*Screenshots from macOS; the computer hostname is blurred for privacy.*
 
 ## Shortcuts
 
