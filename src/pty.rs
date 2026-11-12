@@ -66,6 +66,23 @@ impl PtySession {
         session_id: u64, cols: usize, rows: usize, term: &str,
         proxy: EventLoopProxy<UserEvent>, cwd: Option<&str>,
     ) -> Result<Self> {
+        Self::start_in_dir_with_command(session_id, cols, rows, term, proxy, cwd, None)
+    }
+
+    /// Start the first terminal session with an explicit argv (e.g. rst -e nmtui).
+    /// New tabs and splits continue to launch the user's normal shell.
+    pub fn start_with_command(
+        session_id: u64, cols: usize, rows: usize, term: &str,
+        proxy: EventLoopProxy<UserEvent>, argv: &[String],
+    ) -> Result<Self> {
+        anyhow::ensure!(!argv.is_empty(), "terminal command cannot be empty");
+        Self::start_in_dir_with_command(session_id, cols, rows, term, proxy, None, Some(argv))
+    }
+
+    fn start_in_dir_with_command(
+        session_id: u64, cols: usize, rows: usize, term: &str,
+        proxy: EventLoopProxy<UserEvent>, cwd: Option<&str>, argv: Option<&[String]>,
+    ) -> Result<Self> {
         let system = native_pty_system();
         let pair = system.openpty(PtySize {
             rows: rows.min(u16::MAX as usize) as u16,
@@ -75,10 +92,15 @@ impl PtySession {
         })?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let shell_name = std::path::Path::new(&shell)
+        let (program, arguments): (&str, &[String]) = match argv.and_then(|args| args.split_first()) {
+            Some((program, arguments)) => (program, arguments),
+            None => (&shell, &[]),
+        };
+        let shell_name = std::path::Path::new(program)
             .file_name().and_then(|part| part.to_str()).unwrap_or("sh")
             .to_owned();
-        let mut command = CommandBuilder::new(&shell);
+        let mut command = CommandBuilder::new(program);
+        for arg in arguments { command.arg(arg); }
         if let Some(cwd) = cwd { command.cwd(cwd); }
         command.env("TERM", term);
         command.env("COLORTERM", "truecolor");
@@ -87,7 +109,7 @@ impl PtySession {
         let child = pair
             .slave
             .spawn_command(command)
-            .with_context(|| format!("failed to start {shell}"))?;
+            .with_context(|| format!("failed to start {program}"))?;
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;
