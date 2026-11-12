@@ -26,11 +26,22 @@ pub struct Config {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct WindowConfig {
+    #[serde(default)]
+    pub startup_mode: StartupMode,
     #[serde(default = "default_decorations")]
     pub decorations: bool,
     pub columns: usize,
     pub rows: usize,
     pub padding: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StartupMode {
+    #[default]
+    Windowed,
+    Maximized,
+    Fullscreen,
 }
 
 fn default_decorations() -> bool { true }
@@ -67,6 +78,18 @@ pub struct ScrollbackConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct TerminalConfig {
     pub term: String,
+    #[serde(default)]
+    pub shell: String,
+    #[serde(default)]
+    pub shell_args: Vec<String>,
+}
+
+impl TerminalConfig {
+    pub fn shell_program(&self) -> String {
+        if !self.shell.is_empty() { return self.shell.clone(); }
+        std::env::var("SHELL").ok().filter(|shell| !shell.is_empty())
+            .unwrap_or_else(|| "/bin/sh".into())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -229,6 +252,9 @@ pub fn load() -> Result<Config> {
     }
 
     let config: Config = settings.try_into().context("invalid rst config values")?;
+    anyhow::ensure!(!config.terminal.shell.contains(['\0', '\n', '\r'])
+        && config.terminal.shell_args.iter().all(|arg| !arg.contains('\0')),
+        "terminal shell and arguments must not contain invalid control characters");
     anyhow::ensure!(config.window.columns > 0 && config.window.rows > 0, "window size must be positive");
     anyhow::ensure!(config.font.size >= 6.0 && config.font.size <= 72.0, "font size must be 6..72");
     anyhow::ensure!(config.window.padding <= 128, "padding must be <= 128");
@@ -273,6 +299,20 @@ mod tests {
         value.as_table_mut().unwrap().remove("url_picker");
         let legacy: Config = value.try_into().unwrap();
         assert_eq!(legacy.url_picker.recent_outputs, 20);
+    }
+
+    #[test]
+    fn startup_modes_parse_and_reject_typos() {
+        for (name, expected) in [("windowed", StartupMode::Windowed),
+            ("maximized", StartupMode::Maximized), ("fullscreen", StartupMode::Fullscreen)] {
+            let value: WindowConfig = toml::from_str(&format!(
+                "columns = 80\nrows = 24\npadding = 6\nstartup_mode = '{name}'")).unwrap();
+            assert_eq!(value.startup_mode, expected);
+        }
+        let legacy: WindowConfig = toml::from_str("columns = 80\nrows = 24\npadding = 6").unwrap();
+        assert_eq!(legacy.startup_mode, StartupMode::Windowed);
+        assert!(toml::from_str::<WindowConfig>(
+            "columns = 80\nrows = 24\npadding = 6\nstartup_mode = 'maxmized'").is_err());
     }
 
     #[test]

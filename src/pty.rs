@@ -51,36 +51,53 @@ pub struct PtySession {
     foreground_name: Option<String>,
 }
 
+fn shell_command(config: &crate::config::TerminalConfig, cwd: Option<&str>, argv: Option<&[String]>) -> CommandBuilder {
+    let shell = config.shell_program();
+    let (program, arguments): (&str, &[String]) = match argv.and_then(|args| args.split_first()) {
+        Some((program, arguments)) => (program, arguments),
+        None => (&shell, &config.shell_args),
+    };
+    let mut command = CommandBuilder::new(program);
+    for arg in arguments { command.arg(arg); }
+    if let Some(cwd) = cwd { command.cwd(cwd); }
+    command.env("TERM", &config.term);
+    if argv.is_none() { command.env("SHELL", &shell); }
+    command.env("COLORTERM", "truecolor");
+    // Shell hooks activate only inside rst, never in unrelated terminals.
+    command.env("TERM_PROGRAM", "rst");
+    command
+}
+
 impl PtySession {
     pub fn start(
         session_id: u64,
         cols: usize,
         rows: usize,
-        term: &str,
+        config: &crate::config::TerminalConfig,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Result<Self> {
-        Self::start_in_dir(session_id, cols, rows, term, proxy, None)
+        Self::start_in_dir(session_id, cols, rows, config, proxy, None)
     }
 
     pub fn start_in_dir(
-        session_id: u64, cols: usize, rows: usize, term: &str,
+        session_id: u64, cols: usize, rows: usize, config: &crate::config::TerminalConfig,
         proxy: EventLoopProxy<UserEvent>, cwd: Option<&str>,
     ) -> Result<Self> {
-        Self::start_in_dir_with_command(session_id, cols, rows, term, proxy, cwd, None)
+        Self::start_in_dir_with_command(session_id, cols, rows, config, proxy, cwd, None)
     }
 
     /// Start the first terminal session with an explicit argv (e.g. rst -e nmtui).
     /// New tabs and splits continue to launch the user's normal shell.
     pub fn start_with_command(
-        session_id: u64, cols: usize, rows: usize, term: &str,
+        session_id: u64, cols: usize, rows: usize, config: &crate::config::TerminalConfig,
         proxy: EventLoopProxy<UserEvent>, argv: &[String],
     ) -> Result<Self> {
         anyhow::ensure!(!argv.is_empty(), "terminal command cannot be empty");
-        Self::start_in_dir_with_command(session_id, cols, rows, term, proxy, None, Some(argv))
+        Self::start_in_dir_with_command(session_id, cols, rows, config, proxy, None, Some(argv))
     }
 
     fn start_in_dir_with_command(
-        session_id: u64, cols: usize, rows: usize, term: &str,
+        session_id: u64, cols: usize, rows: usize, config: &crate::config::TerminalConfig,
         proxy: EventLoopProxy<UserEvent>, cwd: Option<&str>, argv: Option<&[String]>,
     ) -> Result<Self> {
         let system = native_pty_system();
@@ -91,25 +108,13 @@ impl PtySession {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let (program, arguments): (&str, &[String]) = match argv.and_then(|args| args.split_first()) {
-            Some((program, arguments)) => (program, arguments),
-            None => (&shell, &[]),
-        };
-        let shell_name = std::path::Path::new(program)
-            .file_name().and_then(|part| part.to_str()).unwrap_or("sh")
-            .to_owned();
-        let mut command = CommandBuilder::new(program);
-        for arg in arguments { command.arg(arg); }
-        if let Some(cwd) = cwd { command.cwd(cwd); }
-        command.env("TERM", term);
-        command.env("COLORTERM", "truecolor");
-        // Shell hooks activate only inside rst, never in unrelated terminals.
-        command.env("TERM_PROGRAM", "rst");
+        let command = shell_command(config, cwd, argv);
+        let shell_name = std::path::Path::new(&command.get_argv()[0])
+            .file_name().and_then(|part| part.to_str()).unwrap_or("sh").to_owned();
         let child = pair
             .slave
             .spawn_command(command)
-            .with_context(|| format!("failed to start {program}"))?;
+            .with_context(|| format!("failed to start {shell_name}"))?;
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;
@@ -237,5 +242,27 @@ mod tests {
         let (credit, available) = mpsc::sync_channel(1);
         drop(available);
         drop(OutputChunk { bytes: vec![], queued_at: None, credit });
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+    #[test]
+    fn configured_shell_arguments_and_explicit_commands_are_independent() {
+        let config = crate::config::TerminalConfig { term: "xterm-256color".into(),
+            shell: "/path with spaces/fish".into(), shell_args: vec!["-l".into(), "literal $(text)".into()] };
+        let command = shell_command(&config, Some("/tmp"), None);
+        let args: Vec<_> = command.get_argv().iter().map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(args, ["/path with spaces/fish", "-l", "literal $(text)"]);
+        assert_eq!(command.get_env("SHELL").unwrap(), "/path with spaces/fish");
+        assert_eq!(command.get_env("TERM").unwrap(), "xterm-256color");
+        let explicit = vec!["example".into(), "--flag".into()];
+        let command = shell_command(&config, None, Some(&explicit));
+        let args: Vec<_> = command.get_argv().iter().map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(args, ["example", "--flag"]);
+        let legacy: crate::config::TerminalConfig = toml::from_str("term = 'xterm-256color'").unwrap();
+        assert!(legacy.shell.is_empty() && legacy.shell_args.is_empty());
+        assert!(!legacy.shell_program().is_empty());
     }
 }

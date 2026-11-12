@@ -36,7 +36,7 @@ use winit::{
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{UserAttentionType, Window, WindowId},
+    window::{Fullscreen, UserAttentionType, Window, WindowId},
 };
 
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
@@ -329,7 +329,7 @@ impl App {
                     let mut terminal = configured_terminal(&self.config, self.config.window.columns, self.config.window.rows)?;
                     terminal.screen.cwd = cwd.map(str::to_owned);
                     let pty = PtySession::start_in_dir(id, self.config.window.columns, self.config.window.rows,
-                        &self.config.terminal.term, self.proxy.clone(), cwd)?;
+                        &self.config.terminal, self.proxy.clone(), cwd)?;
                     Ok(StoredSession { id, terminal, pty, unread: false })
                 })();
                 match next {
@@ -401,7 +401,7 @@ impl App {
             }
         };
         let mut next_pty = match PtySession::start(
-            new_id, cols, rows, &self.config.terminal.term, self.proxy.clone(),
+            new_id, cols, rows, &self.config.terminal, self.proxy.clone(),
         ) {
             Ok(pty) => pty,
             Err(err) => {
@@ -447,7 +447,7 @@ impl App {
             Ok(terminal) => terminal, Err(err) => { self.notify(format!("Cannot initialize split: {err}")); return; }
         };
         let cwd = self.terminal.screen.cwd.as_deref().filter(|cwd| std::path::Path::new(cwd).is_dir());
-        let next_pty = match PtySession::start_in_dir(new_id, cols, rows, &self.config.terminal.term, self.proxy.clone(), cwd) {
+        let next_pty = match PtySession::start_in_dir(new_id, cols, rows, &self.config.terminal, self.proxy.clone(), cwd) {
             Ok(pty) => pty, Err(err) => { self.notify(format!("Cannot start split shell: {err}")); return; }
         };
         if self.focus.is_focused() && self.terminal.screen.focus_reporting { self.pty.write(b"\x1b[O"); }
@@ -1306,6 +1306,11 @@ impl ApplicationHandler<UserEvent> for App {
             .with_title(&self.terminal.screen.title)
             .with_decorations(self.config.window.decorations)
             .with_inner_size(LogicalSize::new(logical_width, logical_height));
+        let attributes = match self.config.window.startup_mode {
+            config::StartupMode::Windowed => attributes,
+            config::StartupMode::Maximized => attributes.with_maximized(true),
+            config::StartupMode::Fullscreen => attributes.with_fullscreen(Some(Fullscreen::Borderless(None))),
+        };
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -1856,12 +1861,12 @@ fn main() -> Result<()> {
     let pty = if let Some(command) = launch_command.as_deref() {
         PtySession::start_with_command(
             1, config.window.columns, config.window.rows,
-            &config.terminal.term, proxy.clone(), command,
+            &config.terminal, proxy.clone(), command,
         )?
     } else {
         PtySession::start_in_dir(
             initial_id, config.window.columns, config.window.rows,
-            &config.terminal.term, proxy.clone(), initial_cwd,
+            &config.terminal, proxy.clone(), initial_cwd,
         )?
     };
     let mut terminal = configured_terminal(
@@ -1870,6 +1875,7 @@ fn main() -> Result<()> {
     terminal.screen.cwd = initial_cwd.map(str::to_owned);
     let original_font_size = config.font.size;
     let config_blink_ms = config.cursor.blink_interval_ms;
+    let shell_program = config.terminal.shell_program();
     let mut app = App {
         profile,
         config,
@@ -1883,7 +1889,7 @@ fn main() -> Result<()> {
         pane_buffer: Vec::new(),
         inactive_sessions: Vec::new(),
         proxy,
-        shell_label: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+        shell_label: shell_program
             .rsplit('/').next().unwrap_or("sh").to_string(),
         home_dir: std::env::var("HOME").ok(),
         context,

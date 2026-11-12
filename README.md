@@ -81,7 +81,12 @@ powerline = true      # arrow-shaped segments
 show_status = true    # date, time and hostname
 name_mode = "smart"   # program → directory → title → shell
 
+[terminal]
+shell = ""            # empty: $SHELL, then /bin/sh
+shell_args = []       # e.g. ["-l"] for a login shell
+
 [window]
+startup_mode = "windowed" # "windowed", "maximized" or "fullscreen"
 decorations = true    # false hides the native title bar / border
 
 [session]
@@ -89,7 +94,12 @@ restore = false       # true restores the workspace on the next launch
 ```
 
 See [`config/default.toml`](config/default.toml) for fonts, colors, scrollback,
-clipboard and other settings. Restart rst after configuration changes.
+clipboard and other settings. Set `terminal.shell` to an executable such as
+`/opt/homebrew/bin/fish`, `/bin/zsh` or `/usr/bin/fish`; pass arguments separately
+in `shell_args`. It applies to initial shells, tabs, splits and restored panes;
+`rst -e PROGRAM ...` still runs the explicit program. Restart rst after changes.
+In `windowed` mode, `columns` and `rows` set the initial size; `maximized` fills
+the available desktop, while `fullscreen` uses borderless fullscreen.
 Without decorations, drag free tab-bar space or the status area to move the
 window; Wayland window borders remain subject to compositor policy.
 

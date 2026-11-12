@@ -116,6 +116,7 @@ pub struct Renderer {
     ascent: i32,
     // Bottom edge of a regular lowercase glyph, relative to a grid row.
     text_ink_bottom: i32,
+    cursor_vertical: (usize, usize),
 }
 
 /// Font-independent powerline wedge; all writes are clipped by rect.
@@ -214,6 +215,7 @@ impl Renderer {
         let (cell_width, cell_height, ascent, text_ink_bottom) =
             font_cell_metrics(primary, font_size);
 
+        let cursor_vertical = cursor_vertical_metrics(primary, font_size, cell_height, ascent);
         Ok(Self {
             fonts,
             font_sources,
@@ -231,6 +233,7 @@ impl Renderer {
             padding: (padding as f64 * scale) as usize,
             ascent,
             text_ink_bottom,
+            cursor_vertical,
         })
     }
 
@@ -250,6 +253,7 @@ impl Renderer {
         self.cell_height = cell_height;
         self.ascent = ascent;
         self.text_ink_bottom = text_ink_bottom;
+        self.cursor_vertical = cursor_vertical_metrics(&self.fonts[0], pixel_size, cell_height, ascent);
         // Previously rasterized pixels belong to a different font size.
         // Keep parsed font faces and fallback order; only discard bitmaps.
         self.glyphs.clear();
@@ -543,12 +547,29 @@ impl Renderer {
         self.draw_rows(pixels, width, height, screen, selection, preedit, 0..screen.rows);
     }
 
+    fn cursor_geometry(&mut self, screen: &Screen) -> (usize, usize) {
+        let base = self.cursor_vertical;
+        if !cursor_is_visible(screen) || screen.y >= screen.rows || screen.x >= screen.cols { return base; }
+        let cell = screen.display_row(screen.y)[screen.x];
+        if cell.ch == ' ' || is_nerd_icon(cell.ch) { return base; }
+        // Accents and fallback glyphs under a block cursor still need their
+        // complete ink area covered before their foreground is inverted.
+        let baseline = self.ascent + (self.cell_height as i32 - self.font_size.ceil() as i32).max(0) / 2;
+        let (glyph, _, _) = self.glyph(cell.ch, cell.style);
+        let top = (baseline - glyph.metrics.ymin - glyph.metrics.height as i32).max(0) as usize;
+        let bottom = (baseline - glyph.metrics.ymin).max(0) as usize;
+        let top = base.0.min(top).min(self.cell_height - 1);
+        let bottom = (base.0 + base.1).max(bottom).min(self.cell_height);
+        (top, bottom - top)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn draw_rows(
         &mut self, pixels: &mut [u32], width: usize, height: usize,
         screen: &Screen, selection: Option<Selection>, preedit: Option<&Preedit>,
         rows: std::ops::Range<usize>,
     ) {
+        let cursor_vertical = self.cursor_geometry(screen);
         paint_background_rows(
             pixels,
             width,
@@ -560,6 +581,7 @@ impl Renderer {
             selection,
             preedit.is_none(),
             rows.clone(),
+            Some(cursor_vertical),
         );
 
         for row in rows.clone() {
@@ -602,8 +624,8 @@ impl Renderer {
         // Unlike the block cursor, underline and bar must be painted over
         // the completed glyphs. Otherwise the text can hide the thin stroke.
         if preedit.is_none() && rows.contains(&screen.y) {
-            paint_cursor(pixels, width, height, screen,
-                         self.cell_width, self.cell_height, self.padding);
+            paint_cursor_geometry(pixels, width, height, screen,
+                         self.cell_width, self.cell_height, self.padding, cursor_vertical);
         }
         if let Some(preedit) = preedit {
             self.draw_preedit(pixels, width, height, screen, preedit);
@@ -1360,6 +1382,22 @@ fn font_cell_metrics(font: &Font, font_size: f32) -> (usize, usize, i32, i32) {
     (cell_width, cell_height, ascent, text_ink_bottom)
 }
 
+/// Match the primary font's visible capital/descender span, excluding line
+/// leading. Native blinking patches and software cursors share these pixels.
+fn cursor_vertical_metrics(font: &Font, size: f32, cell_height: usize, ascent: i32) -> (usize, usize) {
+    let baseline = ascent + (cell_height as i32 - size.ceil() as i32).max(0) / 2;
+    let mut top = cell_height as i32;
+    let mut bottom = 0;
+    for ch in ['M', 'g', 'j'] {
+        let glyph = font.metrics(ch, size);
+        top = top.min(baseline - glyph.ymin - glyph.height as i32);
+        bottom = bottom.max(baseline - glyph.ymin);
+    }
+    let top = top.clamp(0, cell_height.saturating_sub(1) as i32) as usize;
+    let bottom = bottom.clamp(top as i32 + 1, cell_height as i32) as usize;
+    (top, bottom - top)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct Placement {
     x: usize,
@@ -1676,7 +1714,7 @@ fn paint_backgrounds_with_cursor(
     show_cursor: bool,
 ) {
     paint_background_rows(pixels, width, height, screen, cell_width, cell_height,
-        padding, selection, show_cursor, 0..screen.rows);
+        padding, selection, show_cursor, 0..screen.rows, None);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1684,6 +1722,7 @@ fn paint_background_rows(
     pixels: &mut [u32], width: usize, height: usize, screen: &Screen,
     cell_width: usize, cell_height: usize, padding: usize,
     selection: Option<Selection>, show_cursor: bool, rows: std::ops::Range<usize>,
+    cursor_vertical: Option<(usize, usize)>,
 ) {
     let default_background = if screen.reverse_video {
         screen.palette.foreground
@@ -1770,10 +1809,11 @@ fn paint_background_rows(
             screen, row, screen.x, cells[screen.x], selection, true,
         );
         let x = padding.saturating_add(col.saturating_mul(cell_width));
-        let y = padding.saturating_add(row.saturating_mul(cell_height));
+        let (offset, cursor_height) = cursor_vertical.unwrap_or((0, cell_height));
+        let y = padding.saturating_add(row.saturating_mul(cell_height)).saturating_add(offset);
         rect(pixels, width, height, x, y,
              cell_width.saturating_mul(cell.width.max(1) as usize),
-             cell_height, color);
+             cursor_height, color);
     }
 }
 
@@ -1785,6 +1825,7 @@ fn cursor_is_visible(screen: &Screen) -> bool {
 
 /// Draw narrow cursor styles after the glyph pass. A block cursor uses the
 /// existing per-cell background/foreground treatment in cell_colors().
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn paint_cursor(
     pixels: &mut [u32],
@@ -1795,6 +1836,15 @@ fn paint_cursor(
     cell_height: usize,
     padding: usize,
 ) {
+    paint_cursor_geometry(pixels, stride, height, screen, cell_width, cell_height, padding, (0, cell_height));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_cursor_geometry(
+    pixels: &mut [u32], stride: usize, height: usize, screen: &Screen,
+    cell_width: usize, cell_height: usize, padding: usize,
+    cursor_vertical: (usize, usize),
+) {
     if !cursor_is_visible(screen) || cell_width == 0 || cell_height == 0
         || screen.rows == 0 || screen.cols == 0
     {
@@ -1802,7 +1852,9 @@ fn paint_cursor(
     }
 
     let x = padding.saturating_add(screen.x.min(screen.cols - 1).saturating_mul(cell_width));
-    let y = padding.saturating_add(screen.y.min(screen.rows - 1).saturating_mul(cell_height));
+    let y = padding.saturating_add(screen.y.min(screen.rows - 1).saturating_mul(cell_height))
+        .saturating_add(cursor_vertical.0);
+    let cursor_height = cursor_vertical.1;
     let thickness = (cell_width.min(cell_height) / 7).clamp(1, 3);
     let color = if screen.reverse_video {
         screen.palette.background
@@ -1813,11 +1865,11 @@ fn paint_cursor(
         CursorShape::Block => {}
         CursorShape::Underline => rect(
             pixels, stride, height,
-            x, y.saturating_add(cell_height.saturating_sub(thickness)),
+            x, y.saturating_add(cursor_height.saturating_sub(thickness)),
             cell_width, thickness, color,
         ),
         CursorShape::Bar => rect(
-            pixels, stride, height, x, y, thickness, cell_height, color,
+            pixels, stride, height, x, y, thickness, cursor_height, color,
         ),
     }
 }
@@ -2013,7 +2065,11 @@ mod tests {
         let y = renderer.padding + renderer.cell_height;
         let mut pixels = vec![0u32; width * height];
         renderer.draw(&mut pixels, width, height, &terminal.screen, None, None);
-        assert_eq!(pixels[y * width + x], terminal.screen.palette.cursor);
+        let cursor_y = y + renderer.cursor_vertical.0;
+        assert_eq!(pixels[cursor_y * width + x], terminal.screen.palette.cursor);
+        if renderer.cursor_vertical.0 > 0 {
+            assert_eq!(pixels[y * width + x], 0x334455, "line leading must keep its background");
+        }
         assert_eq!(
             pixels[(y + renderer.cell_height) * width + x],
             0x334455,
@@ -2567,7 +2623,7 @@ mod tests {
         let width = renderer.cell_width * terminal.screen.cols;
         let height = renderer.cell_height * terminal.screen.rows;
         let x = 3 * renderer.cell_width;
-        let y = 2 * renderer.cell_height;
+        let y = 2 * renderer.cell_height + renderer.cursor_vertical.0;
 
         let mut ordinary = vec![0u32; width * height];
         renderer.draw(&mut ordinary, width, height, &terminal.screen, None, None);
@@ -2973,6 +3029,38 @@ mod startup_benchmark {
 #[cfg(test)]
 mod cursor_patch_tests {
     use super::*;
+
+    #[test]
+    fn cursor_tracks_font_ink_at_regular_retina_and_fractional_scales() {
+        let config: crate::config::Config = toml::from_str(include_str!("../config/default.toml")).unwrap();
+        for family in [&config.font.family, "Menlo", "Monaco"] {
+            let mut font = config.font.clone();
+            font.family = family.into();
+            let mut logical_height: Option<f64> = None;
+            for scale in [1.0, 1.5, 2.0] {
+                let mut renderer = Renderer::new(&font, 2, scale).unwrap();
+                let palette = crate::terminal::Palette::try_from(&config.colors).unwrap();
+                let mut terminal = crate::terminal::Terminal::new(2, 2, 0, palette);
+                let width = renderer.padding * 2 + renderer.cell_width * 2;
+                let height = renderer.padding * 2 + renderer.cell_height * 2;
+                let mut base = vec![0; width * height];
+                terminal.screen.cursor_blink_on = false;
+                renderer.draw(&mut base, width, height, &terminal.screen, None, None);
+                terminal.screen.cursor_blink_on = true;
+                let patch = renderer.cursor_patch(&mut base, width, height, &terminal.screen, None).unwrap();
+                assert_eq!(patch.height, renderer.cursor_vertical.1);
+                assert_eq!(patch.y, renderer.padding + renderer.cursor_vertical.0);
+                assert_eq!(patch.width, renderer.cell_width);
+                assert!(patch.height < renderer.cell_height, "cursor must exclude line spacing");
+                let h = patch.height as f64 / scale;
+                if let Some(reference) = logical_height {
+                    assert!((h - reference).abs() <= 2.0, "font {family}, scale {scale}");
+                } else { logical_height = Some(h); }
+                renderer.set_font_size(font.size + 3.0, scale);
+                assert!(renderer.cursor_vertical.0 + renderer.cursor_vertical.1 <= renderer.cell_height);
+            }
+        }
+    }
 
     #[test]
     fn compositor_patch_matches_full_cursor_render_and_restores_base() {

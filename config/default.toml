@@ -2,6 +2,8 @@
 # Copy to ~/.config/rst/config.toml (or $XDG_CONFIG_HOME/rst/config.toml).
 
 [window]
+# Initial window state: "windowed", "maximized" or "fullscreen".
+startup_mode = "windowed"
 # Native title bar / window border. The compositor may override this on Wayland.
 decorations = true
 columns = 96
@@ -32,6 +34,11 @@ blink_interval_ms = 700
 lines = 10000
 
 [terminal]
+# Empty: use $SHELL, falling back to /bin/sh. Set an executable, not a command line.
+# Example: shell = "/opt/homebrew/bin/fish" (macOS) or "/usr/bin/fish" (Linux).
+shell = ""
+# Arguments are passed directly, without shell interpretation; e.g. ["-l"].
+shell_args = []
 term = "xterm-256color"
 
 [bell]
