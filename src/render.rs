@@ -227,6 +227,23 @@ impl Renderer {
             eprintln!("rst: available font chain: {}", loaded.join(" -> "));
         }
 
+        // Symbol-only fallbacks must never define the terminal grid. A missing
+        // preferred family can otherwise make Nerd Font Symbols the first face,
+        // while ordinary text is drawn with a much narrower fallback font.
+        let primary_index = fonts.iter().position(|font| {
+            let Ok(face) = rustybuzz::ttf_parser::Face::parse(
+                &font.source.bytes, font.source.face_index,
+            ) else { return false; };
+            (' '..='~').all(|ch| face.glyph_index(ch).is_some_and(|id| id.0 != 0))
+                && font.font().is_some()
+        }).context("no usable text font found; install Hack or DejaVu Sans Mono")?;
+        // Keep all faces, including symbols, and their styles in sync. Moving
+        // the text face first also makes ASCII rendering match its metrics.
+        fonts[..=primary_index].rotate_right(1);
+        font_sources[..=primary_index].rotate_right(1);
+        styled_fonts[..=primary_index].rotate_right(1);
+        styled_sources[..=primary_index].rotate_right(1);
+
         let primary = fonts.first().and_then(LazyFont::font)
             .context("no usable monospace font found; install Menlo or a Nerd Font")?;
         let font_size = (config.size as f64 * scale) as f32;
@@ -2310,6 +2327,39 @@ mod tests {
         let rect = place_glyph(&metrics, 12, 30, 13, 24, 18, true);
         assert_eq!(rect, Placement { x: 12, y: 30, width: 13, height: 24 });
         assert!(is_powerline_separator('\u{e0b0}'));
+    }
+
+    #[test]
+    fn symbol_fallback_does_not_define_text_cell_width() {
+        let mut db = Database::new();
+        db.load_system_fonts();
+        let symbols = "Symbols Nerd Font Mono";
+        let text = "DejaVu Sans Mono";
+        // This regression runs with Gentoo's actual split font packages.
+        for family in [symbols, text] {
+            if db.query(&Query { families: &[Family::Name(family)], ..Query::default() }).is_none() {
+                eprintln!("font regression requires {family}");
+                return;
+            }
+        }
+        let config = FontConfig {
+            family: "rst intentionally unavailable font".into(),
+            fallback: vec![symbols.into(), text.into()],
+            size: 16.5,
+            ligatures: true,
+        };
+        let renderer = Renderer::new(&config, 0, 1.0).unwrap();
+        let text_id = db.query(&Query {
+            families: &[Family::Name(text)], ..Query::default()
+        }).unwrap();
+        let (expected, _) = load_font_face(&db, text_id).unwrap();
+        assert_eq!(renderer.cell_width, font_cell_metrics(expected.font().unwrap(), config.size).0);
+        assert!(renderer.fonts[0].has_glyph('M'));
+        assert!(renderer.fonts[0].has_glyph('a'));
+        // The symbol face is retained after the selected text face.
+        assert_eq!(renderer.font_sources[1].bytes, load_font_face(
+            &db, db.query(&Query { families: &[Family::Name(symbols)], ..Query::default() }).unwrap()
+        ).unwrap().1.bytes);
     }
 
     #[test]
