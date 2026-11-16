@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """Compare real-window startup with identical PTY workloads (Python 3)."""
-import argparse
-import hashlib
-import json
-import os
-from pathlib import Path
-import re
-import select
-import shutil
-import statistics
-import subprocess
 import sys
-import tempfile
-import time
 
 
 def fixture(result):
+    # This path runs in every terminal child. Do not import the controller's
+    # argument parser, hashing, statistics, etc. before emitting the prompt.
+    import os
     import tty
     tty.setraw(0)
-    os.write(1, b'\x1b]133;A\x07startup benchmark> \x1b]133;B\x07\x1b[6n')
+    payload = b'\x1b]133;A\x07startup benchmark> \x1b]133;B\x07\x1b[6n'
+    while payload:
+        payload = payload[os.write(1, payload):]
+    import re
+    import select
+    import time
     data = b''
     deadline = time.monotonic() + 10
     while not re.search(rb'\x1b\[\d+;\d+R', data):
@@ -29,9 +25,27 @@ def fixture(result):
         if not chunk:
             raise RuntimeError('PTY closed before the cursor-position reply')
         data = (data + chunk)[-4096:]
-    Path(result).write_text(str(time.time_ns()))
+    with open(result, 'w') as ready:
+        ready.write(str(time.time_ns()))
     # Let the terminal submit the frame before the child closes the window.
     time.sleep(.3)
+
+
+if __name__ == '__main__' and len(sys.argv) == 3 and sys.argv[1] == '--fixture':
+    fixture(sys.argv[2])
+    raise SystemExit
+
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import statistics
+import subprocess
+import tempfile
+import time
 
 
 def run_once(name, binary, args):
@@ -67,29 +81,45 @@ def run_once(name, binary, args):
             command = [*launcher, '--args', *command[1:]]
         started = time.time_ns()
         process = subprocess.run(command, env=env, capture_output=True, timeout=60)
+        stderr = process.stderr.decode(errors='replace')
         if process.returncode or not (root / 'ready').exists():
-            raise RuntimeError(f'{name} failed ({process.returncode}): {process.stderr.decode(errors="replace")[-2000:]}')
+            raise RuntimeError(f'{name} failed ({process.returncode}): {stderr[-2000:]}')
         result = {'app': name, 'parse_ready_ms': (int((root / 'ready').read_text()) - started) / 1e6}
         if name != 'alacritty':
+            # Older reference binaries counted a frame even if present failed.
+            # A parser reply alone does not establish that a frame was submitted.
+            if any(error in stderr for error in (
+                'rst: present:', 'rst: resize surface:', 'rst: acquire buffer:',
+            )):
+                raise RuntimeError(f'{name} failed to submit a frame: {stderr[-2000:]}')
             profile = json.loads((root / 'profile.json').read_text())
             if profile['prompt_frame_ms'] is None:
                 raise RuntimeError(f'{name} never submitted a prompt frame')
-            result['prompt_frame_ms'] = profile['main_started_unix_ms'] - started / 1e6 + profile['prompt_frame_ms']
+            launch_offset_ms = profile['main_started_unix_ms'] - started / 1e6
+            result['first_frame_ms'] = launch_offset_ms + profile['first_frame_ms']
+            result['prompt_frame_ms'] = launch_offset_ms + profile['prompt_frame_ms']
             result['profile'] = profile
+        if stderr:
+            result['stderr'] = stderr
         return result
 
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == '--fixture':
-        fixture(sys.argv[2])
-        return
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog='Without Alacritty, provide --reference-rst (or --reference-app) for an rst-only comparison. '
+               'The same child bypasses interactive shell startup and session restoration. '
+               'Reported frames are submissions, not physical display presentation.')
     parser.add_argument('--binary', type=Path, default=Path('target/release/rst'))
     parser.add_argument('--app', type=Path, help='macOS: launch this rst.app through Launch Services')
     parser.add_argument('--app-id', help='With --app, launch rst by this bundle identifier instead of path')
     parser.add_argument('--reference-app', type=Path, help='macOS: optional reference rst.app')
     parser.add_argument('--reference-rst', type=Path, help='Optional saved pre-change rst binary')
-    parser.add_argument('--alacritty', default=shutil.which('alacritty'))
+    comparison = parser.add_mutually_exclusive_group()
+    comparison.add_argument('--alacritty', default=shutil.which('alacritty'),
+                            help='Alacritty executable (default: discover in PATH; optional with a reference rst)')
+    comparison.add_argument('--no-alacritty', action='store_true',
+                            help='Compare only rst and its saved reference, even when Alacritty is installed')
     parser.add_argument('--user-config', action='store_true', help='Use existing terminal configs instead of matching fixture configs')
     parser.add_argument('--runs', type=int, default=5)
     parser.add_argument('--warmup', type=int, default=1)
@@ -98,8 +128,12 @@ def main():
     parser.add_argument('--fallback', action='append', default=None)
     parser.add_argument('--output', type=Path, default=Path('target/benchmarks/startup.json'))
     args = parser.parse_args()
-    if args.runs < 1 or args.warmup < 0 or not args.alacritty:
-        parser.error('positive --runs, nonnegative --warmup and an Alacritty executable are required')
+    if args.runs < 1 or args.warmup < 0:
+        parser.error('positive --runs and nonnegative --warmup are required')
+    if args.no_alacritty:
+        args.alacritty = None
+    if not args.alacritty and not (args.reference_rst or args.reference_app):
+        parser.error('provide --reference-rst or --reference-app when Alacritty is unavailable or disabled')
     if args.app:
         args.app = args.app.resolve()
     if args.reference_app:
@@ -115,12 +149,19 @@ def main():
         parser.error('--reference-app requires --app')
     if args.app and args.reference_rst:
         parser.error('use --reference-app with --app, not --reference-rst')
-    binaries = {'rst': (args.app / 'Contents/MacOS/rst' if args.app else args.binary).resolve(),
-                'alacritty': Path(args.alacritty).resolve()}
+    binaries = {'rst': (args.app / 'Contents/MacOS/rst' if args.app else args.binary).resolve()}
+    if args.alacritty:
+        alacritty = shutil.which(args.alacritty)
+        if not alacritty:
+            parser.error(f'Alacritty executable not found: {args.alacritty}')
+        binaries['alacritty'] = Path(alacritty).resolve()
     if args.reference_app:
         binaries['rst-before'] = (args.reference_app / 'Contents/MacOS/rst').resolve()
     if args.reference_rst:
         binaries['rst-before'] = args.reference_rst.resolve()
+    for name, binary in binaries.items():
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            parser.error(f'{name} executable not found or not executable: {binary}')
     fingerprints = {name: hashlib.sha256(binary.read_bytes()).hexdigest() for name, binary in binaries.items()}
     results = []
     for index in range(args.warmup + args.runs):
@@ -136,13 +177,22 @@ def main():
                 result['run'] = index - args.warmup
                 results.append(result)
     medians = {name: statistics.median(r['parse_ready_ms'] for r in results if r['app'] == name) for name in binaries}
+    frame_medians = {
+        metric: {name: statistics.median(r[metric] for r in results if r['app'] == name)
+                 for name in binaries if name != 'alacritty'}
+        for metric in ('first_frame_ms', 'prompt_frame_ms')
+    }
     report = {'schema': 1, 'platform': sys.platform, 'launch_services': bool(args.app), 'launch_bundle_id': args.app_id, 'user_config': args.user_config, 'font_family': None if args.user_config else args.font_family,
               'font_size': None if args.user_config else args.font_size,
               'fallback': None if args.user_config else args.fallback, 'warmup_runs': args.warmup,
-              'binary_sha256': fingerprints, 'median_parse_ready_ms': medians, 'runs': results}
+              'binary_sha256': fingerprints, 'median_parse_ready_ms': medians,
+              'median_first_frame_ms': frame_medians['first_frame_ms'],
+              'median_prompt_frame_ms': frame_medians['prompt_frame_ms'], 'runs': results}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
     print('Median spawn to PTY reply:', ', '.join(f'{name} {value:.1f} ms' for name, value in medians.items()))
+    for metric, label in (('first_frame_ms', 'first submitted frame'), ('prompt_frame_ms', 'submitted prompt frame')):
+        print(f'Median spawn to {label}:', ', '.join(f'{name} {value:.1f} ms' for name, value in frame_medians[metric].items()))
     print(f'Report: {args.output}')
 
 

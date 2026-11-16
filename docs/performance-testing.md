@@ -297,7 +297,9 @@ python3 scripts/benchmark-startup.py --reference-rst /tmp/rst-before \
   --user-config --output target/benchmarks/startup-user-config.json
 ```
 
-Requires Python 3, Alacritty and a working desktop session. Each temporary window
+Requires Python 3 and a working desktop session. Alacritty is optional when a
+saved rst binary or app is supplied; add `--no-alacritty` for an rst-only
+comparison even when Alacritty is installed. Each temporary window
 closes itself. The default fixture uses 96x28 cells, 0xProto Nerd Font at 16.5,
 and rst's default fallback list. `--font-family`, `--font-size` and repeated
 `--fallback` options change these settings. `--alacritty` selects an executable.
@@ -313,6 +315,12 @@ rc/theme work and Dock/Launch Services launch time are excluded. The test uses
 one unreported warmup per executable, five measured runs and alternating order;
 reports include all samples and binary hashes. These are warm-start comparisons,
 not cold-boot or first-launch measurements of a newly built binary.
+
+The fixture now emits its prompt before importing the benchmark controller's
+modules. Re-run both binaries with the same current script; older reports
+include that extra Python import time and are not directly comparable. Reports
+also include first-frame and prompt-frame medians, and reject rst surface or
+presentation failures instead of accepting parser readiness alone.
 
 On the development Mac, with release builds and Alacritty 0.17.0:
 
@@ -389,3 +397,56 @@ python3 scripts/benchmark-startup.py --app ~/Applications/rst.app \
 bundle ID resolves to it. `--reference-app /path/to/old.app` compares another
 bundle. The normal search-and-Return interaction in Spotlight is not automated
 by this benchmark.
+
+## Font preparation follow-up (2026-11-16)
+
+Only the selected text-primary face expands outlines during initialization,
+even when a missing preferred family leaves a symbol font first in the
+configured fallback list. All fallbacks remain available. Each selected file or
+in-memory source is copied into one owned snapshot shared by its collection
+faces; regular/bold/italic indices remain distinct. This does not retain mutable
+file mappings or introduce a persistent font-discovery cache. Styled glyphs first
+probe the requested cmap entry, avoiding outline parsing for missing characters
+without allocating a complete coverage set for ordinary bold/italic text.
+
+The native Menlo regression measures 11,097,104 logical face-source bytes versus
+4,628,996 uniquely copied bytes across Menlo and the generic monospace fallback:
+about 6.2 MiB fewer font-data copies. These are retained source bytes, not a
+measurement of total application RSS. Pixel-equivalence, fallback, style and
+collection-index regressions cover the rendering behavior.
+
+The following release comparisons use saved `a12cd34` binaries and the same
+current fixture, 12 alternating measured runs per binary after two warmups.
+Each result is process spawn to the first **submitted prompt-containing frame**,
+not physical display presentation. Interactive shell rc work and session
+restoration are bypassed by `-e`; system caches are not flushed.
+
+| Configuration | Before | After |
+| --- | ---: | ---: |
+| macOS, fixture defaults, installed preferred font | 155 ms | 159 ms |
+| macOS, existing maximized configuration with tabs/status | 193 ms | 189 ms |
+| Gentoo aarch64 VM, ASCII prompt, missing 0xProto and Symbols before DejaVu | 242 ms | 123 ms |
+| Gentoo aarch64 VM, directly available Hack primary | 150 ms | 149 ms |
+
+The normal macOS cases remain within local measurement variation; a same-binary
+control differed by about 6 ms. The missing-primary Gentoo case improves by
+about 49% because the unused symbol face no longer expands its outlines before
+the text font is selected. A prompt that uses that symbol font still initializes
+it when drawing those symbols. Font discovery still scans system fonts at startup;
+these changes do not claim to remove that remaining cost.
+
+Reproduce an rst-only comparison with:
+
+```sh
+python3 scripts/benchmark-startup.py --reference-rst /tmp/rst-before \
+  --no-alacritty --runs 12 --warmup 2 \
+  --output target/benchmarks/startup-before-after.json
+```
+
+Local raw reports under `target/benchmarks/` are
+`startup-font-preparation-macos.json`, `startup-font-preparation-macos-user.json`,
+`startup-font-preparation-gentoo-defaults.json` and
+`startup-font-preparation-gentoo-hack.json`; they include all samples and binary
+hashes. An additional native smoke comparison uses a bold/italic Unicode prompt
+with combining characters, CJK and a Nerd Font icon; both binaries successfully
+submit the prompt frame, and the updated style path shows no startup regression.

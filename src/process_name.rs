@@ -78,10 +78,28 @@ mod tests {
     #[test]
     fn native_name_is_not_a_typed_command_argument() {
         let mut child = std::process::Command::new("sleep")
-            .arg("2").spawn().expect("sleep must be available");
-        let actual = executable_name(child.id() as i32);
+            .arg("10").spawn().expect("sleep must be available");
+        // Under parallel test load, observing the child's procfs name can
+        // briefly lag spawning it. Production probes already retry on their
+        // next interval; give this one-shot assertion a bounded retry too.
+        let observed = (|| -> std::io::Result<Option<String>> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            loop {
+                if let Some(status) = child.try_wait()? {
+                    return Err(std::io::Error::other(format!("sleep exited before its name was observed: {status}")));
+                }
+                let actual = executable_name(child.id() as i32);
+                if actual.as_deref() == Some("sleep") || std::time::Instant::now() >= deadline {
+                    return Ok(actual);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        })();
+        // Reap the child before any assertion, including observation errors.
         let _ = child.kill();
-        let _ = child.wait();
+        let reaped = child.wait();
+        let actual = observed.expect("sleep must remain alive while its name is observed");
+        reaped.expect("sleep must be reaped");
         assert_eq!(actual.as_deref(), Some("sleep"));
     }
 

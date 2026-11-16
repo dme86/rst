@@ -25,14 +25,42 @@ struct Glyph {
     bitmap: Vec<u8>,
 }
 
+/// Copy each selected source once, including collections with several styles.
+/// Keep owned snapshots rather than retaining mutable file mappings. The small
+/// startup-only list also retains in-memory sources so their identities cannot
+/// be recycled while cached bytes are still in use.
+#[derive(Default)]
+struct FontByteCache {
+    sources: Vec<(fontdb::Source, std::sync::Arc<[u8]>)>,
+}
+
+impl FontByteCache {
+    fn load(&mut self, db: &Database, id: fontdb::ID) -> Option<FontBytes> {
+        let (source, face_index) = db.face_source(id)?;
+        for (cached, bytes) in &self.sources {
+            let same_source = match (cached, &source) {
+                (fontdb::Source::File(a), fontdb::Source::File(b)) => a == b,
+                (fontdb::Source::Binary(a) | fontdb::Source::SharedFile(_, a),
+                 fontdb::Source::Binary(b) | fontdb::Source::SharedFile(_, b)) =>
+                    std::sync::Arc::ptr_eq(a, b),
+                _ => false,
+            };
+            if same_source {
+                return Some(FontBytes { bytes: bytes.clone(), face_index });
+            }
+        }
+        let bytes = db.with_face_data(id, |data, _| std::sync::Arc::<[u8]>::from(data))?;
+        self.sources.push((source, bytes.clone()));
+        Some(FontBytes { bytes, face_index })
+    }
+}
+
 /// Retain a validated regular face without eagerly expanding its outlines.
-fn load_font_face(db: &Database, id: fontdb::ID) -> Option<(LazyFont, FontBytes)> {
-    db.with_face_data(id, |data, face_index| {
-        // Validate the table structure without expanding every glyph outline.
-        rustybuzz::ttf_parser::Face::parse(data, face_index).ok()?;
-        let source = FontBytes { bytes: data.into(), face_index };
-        Some((LazyFont { source: source.clone(), parsed: std::sync::OnceLock::new(), coverage: std::sync::OnceLock::new() }, source))
-    }).flatten()
+fn load_font_face(db: &Database, id: fontdb::ID, bytes: &mut FontByteCache) -> Option<(LazyFont, FontBytes)> {
+    let source = bytes.load(db, id)?;
+    // Validate the table structure without expanding every glyph outline.
+    rustybuzz::ttf_parser::Face::parse(&source.bytes, source.face_index).ok()?;
+    Some((LazyFont { source: source.clone(), parsed: std::sync::OnceLock::new(), coverage: std::sync::OnceLock::new() }, source))
 }
 
 // Only the primary regular face is parsed at startup. Fallbacks and styles
@@ -45,6 +73,19 @@ struct LazyFont {
 }
 
 impl LazyFont {
+    fn style_has_glyph(&self, ch: char) -> bool {
+        if let Some(parsed) = self.parsed.get() {
+            return parsed.as_ref().is_some_and(|font| font.has_glyph(ch));
+        }
+        // A present style glyph will parse the font immediately. Probe just
+        // this codepoint instead of first building a complete coverage set.
+        let covered = rustybuzz::ttf_parser::Face::parse(&self.source.bytes, self.source.face_index)
+            .ok().and_then(|face| face.tables().cmap)
+            .is_some_and(|cmap| cmap.subtables.into_iter().any(|subtable|
+                subtable.glyph_index(ch as u32).is_some_and(|id| id.0 != 0)));
+        covered && self.font().is_some_and(|font| font.has_glyph(ch))
+    }
+
     fn has_glyph(&self, ch: char) -> bool {
         if let Some(parsed) = self.parsed.get() {
             return parsed.as_ref().is_some_and(|font| font.has_glyph(ch));
@@ -81,6 +122,7 @@ fn load_style_face(
     families: &[Family<'_>],
     bold: bool,
     italic: bool,
+    bytes: &mut FontByteCache,
 ) -> Option<LazyFont> {
     let query = Query {
         families,
@@ -96,8 +138,8 @@ fn load_style_face(
     if italic && face.style == Style::Normal {
         return None;
     }
-    db.with_face_data(id, |data, face_index| LazyFont {
-        source: FontBytes { bytes: data.into(), face_index },
+    Some(LazyFont {
+        source: bytes.load(db, id)?,
         parsed: std::sync::OnceLock::new(),
         coverage: std::sync::OnceLock::new(),
     })
@@ -156,6 +198,7 @@ impl Renderer {
     pub fn new(config: &FontConfig, padding: u32, scale: f64) -> Result<Self> {
         let mut db = Database::new();
         db.load_system_fonts();
+        let mut bytes = FontByteCache::default();
         let mut fonts = Vec::new();
         let mut font_sources = Vec::new();
         let mut styled_fonts = Vec::new();
@@ -175,14 +218,13 @@ impl Renderer {
             };
             if let Some((font, source)) = db.query(&query)
                 .filter(|id| seen_faces.insert(*id))
-                .and_then(|id| load_font_face(&db, id))
-                .filter(|(font, _)| !fonts.is_empty() || font.font().is_some())
+                .and_then(|id| load_font_face(&db, id, &mut bytes))
             {
                 let family_query = [Family::Name(family)];
                 let variants = [
-                    load_style_face(&db, &family_query, true, false),
-                    load_style_face(&db, &family_query, false, true),
-                    load_style_face(&db, &family_query, true, true),
+                    load_style_face(&db, &family_query, true, false, &mut bytes),
+                    load_style_face(&db, &family_query, false, true, &mut bytes),
+                    load_style_face(&db, &family_query, true, true, &mut bytes),
                 ];
                 styled_sources.push(std::array::from_fn(|i| {
                     variants[i].as_ref().map(|font| font.source.clone())
@@ -204,14 +246,13 @@ impl Renderer {
             };
             if let Some((font, source)) = db.query(&query)
                 .filter(|id| seen_faces.insert(*id))
-                .and_then(|id| load_font_face(&db, id))
-                .filter(|(font, _)| !fonts.is_empty() || font.font().is_some())
+                .and_then(|id| load_font_face(&db, id, &mut bytes))
             {
                 let family_query = [Family::Monospace];
                 let variants = [
-                    load_style_face(&db, &family_query, true, false),
-                    load_style_face(&db, &family_query, false, true),
-                    load_style_face(&db, &family_query, true, true),
+                    load_style_face(&db, &family_query, true, false, &mut bytes),
+                    load_style_face(&db, &family_query, false, true, &mut bytes),
+                    load_style_face(&db, &family_query, true, true, &mut bytes),
                 ];
                 styled_sources.push(std::array::from_fn(|i| {
                     variants[i].as_ref().map(|font| font.source.clone())
@@ -310,7 +351,7 @@ impl Renderer {
         };
         let variant = preferred.iter().copied().find(|&candidate| {
             self.styled_fonts[index][candidate as usize - 1]
-                .as_ref().and_then(LazyFont::font).is_some_and(|font| font.has_glyph(ch))
+                .as_ref().is_some_and(|font| font.style_has_glyph(ch))
         }).unwrap_or(0);
         (index, variant)
     }
@@ -542,8 +583,7 @@ impl Renderer {
             .copied()
             .find(|&variant| {
                 self.styled_fonts[index][variant as usize - 1]
-                    .as_ref().and_then(LazyFont::font)
-                    .is_some_and(|font| font.has_glyph(ch))
+                    .as_ref().is_some_and(|font| font.style_has_glyph(ch))
             })
             .unwrap_or(0);
         let face = if variant == 0 {
@@ -2072,6 +2112,72 @@ fn blend(fg: u32, bg: u32, alpha: u8) -> u32 {
 mod tests {
     use super::*;
 
+    fn source_face(db: &mut Database, source: fontdb::Source, index: u32) -> fontdb::ID {
+        db.push_face_info(fontdb::FaceInfo {
+            id: fontdb::ID::dummy(), source, index,
+            families: vec![], post_script_name: String::new(),
+            style: Style::Normal, weight: Weight::NORMAL,
+            stretch: fontdb::Stretch::Normal, monospaced: true,
+        })
+    }
+
+    #[test]
+    fn font_byte_cache_shares_binary_collections_and_keeps_face_indices() {
+        let mut db = Database::new();
+        let data: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> =
+            std::sync::Arc::new(vec![1, 2, 3, 4]);
+        let first = source_face(&mut db, fontdb::Source::Binary(data.clone()), 0);
+        let second = source_face(&mut db, fontdb::Source::Binary(data), 3);
+        let separate = source_face(&mut db, fontdb::Source::Binary(
+            std::sync::Arc::new(vec![5, 6, 7, 8])), 0);
+        let mut cache = FontByteCache::default();
+        let first = cache.load(&db, first).unwrap();
+        let second = cache.load(&db, second).unwrap();
+        let separate = cache.load(&db, separate).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first.bytes, &second.bytes));
+        assert_eq!((first.face_index, second.face_index), (0, 3));
+        assert_eq!(&*first.bytes, &[1, 2, 3, 4]);
+        assert_eq!(&*separate.bytes, &[5, 6, 7, 8]);
+        assert!(!std::sync::Arc::ptr_eq(&first.bytes, &separate.bytes));
+    }
+
+    #[test]
+    fn font_byte_cache_keeps_file_snapshot_and_honors_shared_file_data() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("rst-font-bytes-{}-{unique}", std::process::id()));
+        std::fs::write(&path, [1, 2, 3, 4]).unwrap();
+        let mut db = Database::new();
+        let first = source_face(&mut db, fontdb::Source::File(path.clone()), 0);
+        let second = source_face(&mut db, fontdb::Source::File(path.clone()), 2);
+        let data: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> =
+            std::sync::Arc::new(vec![5, 6, 7, 8]);
+        let shared = source_face(&mut db, fontdb::Source::SharedFile(path.clone(), data.clone()), 1);
+        let shared_style = source_face(&mut db, fontdb::Source::SharedFile(path.clone(), data), 4);
+        let other_shared = source_face(&mut db, fontdb::Source::SharedFile(path.clone(),
+            std::sync::Arc::new(vec![9, 10, 11, 12])), 0);
+        let mut cache = FontByteCache::default();
+        let first = cache.load(&db, first).unwrap();
+        // A second collection face must reuse the copied snapshot, without
+        // reopening a file that may since have been removed or replaced.
+        std::fs::remove_file(&path).unwrap();
+        let second = cache.load(&db, second).unwrap();
+        let shared = cache.load(&db, shared).unwrap();
+        let shared_style = cache.load(&db, shared_style).unwrap();
+        let other_shared = cache.load(&db, other_shared).unwrap();
+        drop(cache);
+        drop(db);
+        assert!(std::sync::Arc::ptr_eq(&first.bytes, &second.bytes));
+        assert_eq!((first.face_index, second.face_index), (0, 2));
+        assert_eq!(&*first.bytes, &[1, 2, 3, 4]);
+        assert!(std::sync::Arc::ptr_eq(&shared.bytes, &shared_style.bytes));
+        assert_eq!((shared.face_index, shared_style.face_index), (1, 4));
+        assert_eq!(&*shared.bytes, &[5, 6, 7, 8]);
+        assert_eq!(&*other_shared.bytes, &[9, 10, 11, 12]);
+        assert!(!std::sync::Arc::ptr_eq(&first.bytes, &shared.bytes));
+        assert!(!std::sync::Arc::ptr_eq(&shared.bytes, &other_shared.bytes));
+    }
+
     fn test_screen() -> Screen {
         let config: crate::config::Config =
             toml::from_str(include_str!("../config/default.toml")).unwrap();
@@ -2333,15 +2439,22 @@ mod tests {
     fn symbol_fallback_does_not_define_text_cell_width() {
         let mut db = Database::new();
         db.load_system_fonts();
-        let symbols = "Symbols Nerd Font Mono";
-        let text = "DejaVu Sans Mono";
-        // This regression runs with Gentoo's actual split font packages.
-        for family in [symbols, text] {
-            if db.query(&Query { families: &[Family::Name(family)], ..Query::default() }).is_none() {
-                eprintln!("font regression requires {family}");
-                return;
-            }
-        }
+        // Exercise both split Linux font packages and native macOS fonts.
+        let symbols = ["Symbols Nerd Font Mono", "Apple Symbols", "Apple Color Emoji"]
+            .into_iter().find(|family| db.query(&Query {
+                families: &[Family::Name(family)], ..Query::default()
+            }).and_then(|id| db.with_face_data(id, |data, index|
+                rustybuzz::ttf_parser::Face::parse(data, index).is_ok_and(|face|
+                    !(' '..='~').all(|ch| face.glyph_index(ch).is_some_and(|id| id.0 != 0)))))
+                .unwrap_or(false));
+        let text = ["DejaVu Sans Mono", "Menlo", "Monaco", "Courier New"]
+            .into_iter().find(|family| db.query(&Query {
+                families: &[Family::Name(family)], ..Query::default()
+            }).is_some());
+        let (Some(symbols), Some(text)) = (symbols, text) else {
+            eprintln!("font regression requires a symbol font and a monospace text font");
+            return;
+        };
         let config = FontConfig {
             family: "rst intentionally unavailable font".into(),
             fallback: vec![symbols.into(), text.into()],
@@ -2349,16 +2462,19 @@ mod tests {
             ligatures: true,
         };
         let renderer = Renderer::new(&config, 0, 1.0).unwrap();
+        assert!(renderer.fonts.iter().skip(1).all(|font| font.parsed.get().is_none()),
+            "the initial symbol fallback must not expand outlines before text-primary selection");
+        let mut bytes = FontByteCache::default();
         let text_id = db.query(&Query {
             families: &[Family::Name(text)], ..Query::default()
         }).unwrap();
-        let (expected, _) = load_font_face(&db, text_id).unwrap();
+        let (expected, _) = load_font_face(&db, text_id, &mut bytes).unwrap();
         assert_eq!(renderer.cell_width, font_cell_metrics(expected.font().unwrap(), config.size).0);
         assert!(renderer.fonts[0].has_glyph('M'));
         assert!(renderer.fonts[0].has_glyph('a'));
         // The symbol face is retained after the selected text face.
         assert_eq!(renderer.font_sources[1].bytes, load_font_face(
-            &db, db.query(&Query { families: &[Family::Name(symbols)], ..Query::default() }).unwrap()
+            &db, db.query(&Query { families: &[Family::Name(symbols)], ..Query::default() }).unwrap(), &mut bytes
         ).unwrap().1.bytes);
     }
 
@@ -2487,6 +2603,58 @@ mod tests {
         };
         assert!(!invalid.has_glyph('A'));
         assert!(invalid.font().is_none());
+    }
+
+    #[test]
+    fn style_coverage_skips_missing_outlines_without_building_cmap_sets() {
+        let config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        let Ok(mut renderer) = Renderer::new(&config.font, 0, 1.0) else { return; };
+        for style in [TextStyle::BOLD, TextStyle::ITALIC, style_from_sgr(b"\x1b[1;3mX")] {
+            assert_eq!(renderer.face_choice('\u{10ffff}', style), (0, 0));
+            let (_, bold, italic) = renderer.glyph('\u{10ffff}', style);
+            assert_eq!(bold, style.contains(TextStyle::BOLD));
+            assert_eq!(italic, style.contains(TextStyle::ITALIC));
+        }
+        for font in renderer.styled_fonts.iter().flatten().flatten() {
+            assert!(font.parsed.get().is_none(), "missing style glyph must not expand outlines");
+            assert!(font.coverage.get().is_none(), "style probes must not build full cmap sets");
+        }
+        if let Some(font) = renderer.styled_fonts[0].iter().flatten().find(|font|
+            rustybuzz::ttf_parser::Face::parse(&font.source.bytes, font.source.face_index)
+                .is_ok_and(|face| face.glyph_index('A').is_some_and(|id| id.0 != 0))) {
+            assert!(font.style_has_glyph('A'));
+            assert!(font.parsed.get().is_some());
+            assert!(font.coverage.get().is_none(), "present styles must parse without a coverage set");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn font_collection_styles_share_owned_bytes_and_keep_collection_indices() {
+        let mut config: crate::config::Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        config.font.family = "Menlo".into();
+        config.font.fallback.clear();
+        let renderer = Renderer::new(&config.font, 0, 1.0).unwrap();
+        let regular = &renderer.font_sources[0];
+        for style in renderer.styled_sources[0].iter().flatten() {
+            assert!(std::sync::Arc::ptr_eq(&regular.bytes, &style.bytes));
+            assert_ne!(regular.face_index, style.face_index);
+            assert!(rustybuzz::ttf_parser::Face::parse(&style.bytes, style.face_index).is_ok());
+        }
+        assert_eq!(renderer.styled_sources[0].iter().flatten().count(), 3);
+        let mut unique = HashSet::new();
+        let mut logical_bytes = 0;
+        let mut copied_bytes = 0;
+        for source in renderer.font_sources.iter().chain(renderer.styled_sources.iter().flatten().flatten()) {
+            logical_bytes += source.bytes.len();
+            if unique.insert(source.bytes.as_ptr()) { copied_bytes += source.bytes.len(); }
+        }
+        eprintln!("Menlo preparation: {logical_bytes} face-source bytes, {copied_bytes} copied bytes, {} regular faces, {} parsed",
+            renderer.fonts.len(), renderer.fonts.iter().filter(|font| font.parsed.get().is_some()).count());
+        assert!(copied_bytes < logical_bytes);
+        assert!(renderer.fonts.iter().skip(1).all(|font| font.parsed.get().is_none()));
     }
 
     #[test]
