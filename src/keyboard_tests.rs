@@ -198,3 +198,75 @@ fn altgr_keeps_international_printable_characters() {
         b"\x1b\x03"
     );
 }
+
+
+#[test]
+fn macos_option_as_meta_sends_base_keys_not_transformed_unicode() {
+    let modes = KeyboardModes::default();
+    let alt = ModifiersState::ALT;
+    // On a common macOS layout Option+j yields Δ, but terminal Meta+j
+    // must be ESC then the original, layout-aware 'j'.
+    let bytes = encode_mac_option_key(
+        &Key::Character("∆"), &Key::Character("j"),
+        PhysicalKey::Code(KeyCode::KeyJ), KeyLocation::Standard,
+        Some("∆"), alt, modes, true,
+    );
+    assert_eq!(bytes, b"\x1bj");
+
+    // Option+k is a dead accent key on macOS. This path must work even when
+    // winit reports the modifier-transformed key as Dead.
+    let bytes = encode_mac_option_key(
+        &Key::Dead(Some('˚')), &Key::Character("k"),
+        PhysicalKey::Code(KeyCode::KeyK), KeyLocation::Standard,
+        None, alt, modes, true,
+    );
+    assert_eq!(bytes, b"\x1bk");
+
+    let bytes = encode_mac_option_key(
+        &Key::Character("∆"), &Key::Character("j"),
+        PhysicalKey::Code(KeyCode::KeyJ), KeyLocation::Standard,
+        None, alt | ModifiersState::SHIFT, modes, true,
+    );
+    assert_eq!(bytes, b"\x1bJ");
+}
+
+#[test]
+fn macos_option_unicode_side_does_not_leak_escape_prefix() {
+    let modes = KeyboardModes::default();
+    let alt = ModifiersState::ALT;
+    let bytes = encode_mac_option_key(
+        &Key::Character("∆"), &Key::Character("j"),
+        PhysicalKey::Code(KeyCode::KeyJ), KeyLocation::Standard,
+        Some("∆"), alt, modes, false,
+    );
+    assert_eq!(bytes, "∆".as_bytes());
+
+    // macOS Option characters are not a reason to disable Alt+arrow,
+    // which is a navigation escape sequence rather than composed text.
+    let bytes = encode_mac_option_key(
+        &Key::Named(NamedKey::ArrowLeft), &Key::Named(NamedKey::ArrowLeft),
+        PhysicalKey::Code(KeyCode::ArrowLeft), KeyLocation::Standard,
+        None, alt, modes, false,
+    );
+    assert_eq!(bytes, b"\x1b[1;3D");
+    let bytes = encode_mac_option_key(
+        &Key::Character("j"), &Key::Character("j"),
+        PhysicalKey::Code(KeyCode::KeyJ), KeyLocation::Standard,
+        Some("j"), ModifiersState::empty(), modes, true,
+    );
+    assert_eq!(bytes, b"j");
+}
+
+#[test]
+fn macos_option_meta_uses_logical_layout_not_physical_us_mapping() {
+    let mods = ModifiersState::ALT;
+    // Even when the physical key position is Q, the user's layout can
+    // report logical 'a'. Choosing raw physical scancodes would be wrong.
+    let bytes = encode_mac_option_key(
+        &Key::Character("å"), &Key::Character("a"),
+        PhysicalKey::Code(KeyCode::KeyQ), KeyLocation::Standard,
+        Some("å"), mods, KeyboardModes::default(), true,
+    );
+    assert_eq!(bytes, b"\x1ba");
+}
+
