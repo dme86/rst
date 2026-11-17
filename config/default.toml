@@ -24,6 +24,12 @@ fallback = [
   "Menlo", "Monaco", "DejaVu Sans Mono",
 ]
 
+# macOS: left Option acts as Meta/Alt (ESC + the base key), right Option
+# still composes accents and special characters. Other choices:
+# "none" (both compose), "right", "both". Ignored on Linux.
+[keyboard]
+option_as_alt = "left"
+
 [cursor]
 # Cursor shape: block, underline, or bar. DECSCUSR can override it.
 style = "block"

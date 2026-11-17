@@ -221,6 +221,46 @@ pub fn encode_key(
     }
 }
 
+/// macOS Option may change the logical key to a Unicode symbol (Option+j
+/// -> Δ) or a dead key (Option+k). When configured as Meta, encode the
+/// *unmodified logical key* instead, preserving the user's keyboard layout.
+/// The existing encoder then prefixes ESC for Alt. When configured to enter
+/// Unicode, do not add ESC to printable Option-generated text.
+pub fn encode_mac_option_key(
+    logical_key: &Key<&str>,
+    unmodified_key: &Key<&str>,
+    physical: PhysicalKey,
+    location: KeyLocation,
+    composed_text: Option<&str>,
+    mods: ModifiersState,
+    modes: KeyboardModes,
+    option_is_meta: bool,
+) -> Vec<u8> {
+    if !mods.alt_key() || mods.super_key() {
+        return encode_key(logical_key, physical, location, composed_text, mods, modes);
+    }
+    if !option_is_meta {
+        // Right Option still produces normal macOS characters. Named keys
+        // (for example Option+Left) retain ordinary terminal Alt semantics.
+        let mods = if matches!(logical_key, Key::Character(_) | Key::Dead(_)) {
+            mods & !ModifiersState::ALT
+        } else {
+            mods
+        };
+        return encode_key(logical_key, physical, location, composed_text, mods, modes);
+    }
+    // Unmodified key from winit is layout-aware; physical US scancodes
+    // would be wrong for AZERTY, Dvorak etc. Correct shifted ASCII letters.
+    if let Key::Character(value) = unmodified_key {
+        if mods.shift_key() && value.len() == 1 && value.as_bytes()[0].is_ascii_lowercase() {
+            let shifted = value.to_ascii_uppercase();
+            return encode_key(&Key::Character(shifted.as_str()), physical,
+                location, None, mods, modes);
+        }
+    }
+    encode_key(unmodified_key, physical, location, None, mods, modes)
+}
+
 #[cfg(test)]
 #[path = "keyboard_tests.rs"]
 mod tests;

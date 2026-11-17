@@ -35,7 +35,7 @@ use winit::{
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle},
-    keyboard::{Key, ModifiersState, NamedKey},
+    keyboard::{Key, ModifiersKeyState, ModifiersState, NamedKey},
     window::{Fullscreen, UserAttentionType, Window, WindowId},
 };
 
@@ -46,7 +46,7 @@ use crate::{
     command_capture::CommandCapture,
     copy_feedback::CopyNotice,
     config::Config,
-    keyboard::{encode_key, KeyboardModes},
+    keyboard::{encode_key, encode_mac_option_key, KeyboardModes},
     ime::ImeState,
     mouse::MouseReporter,
     pty::{PtySession, UserEvent},
@@ -88,6 +88,8 @@ struct App {
     font_loader: Option<std::thread::JoinHandle<Result<Renderer>>>,
     native_cursor: Option<cursor_layer::CursorLayer>,
     modifiers: ModifiersState,
+    option_left: bool,
+    option_right: bool,
     ime: ImeState,
     mouse: (f64, f64),
     mouse_reporter: MouseReporter,
@@ -1058,17 +1060,31 @@ impl App {
             return; // ANSI KAM (CSI 2 h): suppress PTY keyboard input.
         }
 
-        let bytes = encode_key(
-            &key,
-            event.physical_key,
-            event.location,
-            event.text_with_all_modifiers(),
-            self.modifiers,
-            KeyboardModes {
-                application_cursor: self.terminal.screen.app_cursor,
-                application_keypad: self.terminal.screen.app_keypad,
-            },
-        );
+        let modes = KeyboardModes {
+            application_cursor: self.terminal.screen.app_cursor,
+            application_keypad: self.terminal.screen.app_keypad,
+        };
+        let bytes = if cfg!(target_os = "macos") {
+            // event.logical_key already contains Option-transformed Unicode.
+            // Ask winit for the original key when the configured Option acts
+            // as Meta; the PTY must receive ESC+j, not ESC+Δ.
+            let unmodified = event.key_without_modifiers();
+            encode_mac_option_key(
+                &key,
+                &unmodified.as_ref(),
+                event.physical_key,
+                event.location,
+                event.text_with_all_modifiers(),
+                self.modifiers,
+                modes,
+                self.config.keyboard.option_as_alt.active(
+                    self.modifiers.alt_key(), self.option_left, self.option_right
+                ),
+            )
+        } else {
+            encode_key(&key, event.physical_key, event.location,
+                event.text_with_all_modifiers(), self.modifiers, modes)
+        };
         if !bytes.is_empty() {
             self.selection = None;
             self.terminal.screen.view_offset = 0;
@@ -1395,7 +1411,31 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),
-            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let was_meta = self.config.keyboard.option_as_alt.active(
+                    self.modifiers.alt_key(), self.option_left, self.option_right
+                );
+                self.modifiers = modifiers.state();
+                self.option_left = modifiers.lalt_state() == ModifiersKeyState::Pressed;
+                self.option_right = modifiers.ralt_state() == ModifiersKeyState::Pressed;
+                if cfg!(target_os = "macos") {
+                    let is_meta = self.config.keyboard.option_as_alt.active(
+                        self.modifiers.alt_key(), self.option_left, self.option_right
+                    );
+                    if was_meta != is_meta {
+                        // While Option acts as Meta, macOS dead keys must
+                        // produce KeyboardInput rather than an IME preedit.
+                        // Restore IME as soon as the configured Option is
+                        // released so normal Unicode composition still works.
+                        if let Some(window) = &self.window {
+                            window.set_ime_allowed(!is_meta);
+                        }
+                        if is_meta {
+                            self.ime.clear();
+                        }
+                    }
+                }
+            },
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(event, event_loop),
             WindowEvent::Ime(event) => {
                 if self.help_open || self.url_picker.is_some() {
@@ -1430,6 +1470,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.next_cursor_blink = Instant::now()
                     + Duration::from_millis(self.config.cursor.blink_interval_ms);
                 if !focused {
+                    // Avoid leaving IME disabled after a window loses focus
+                    // while the configured Meta/Option key is held down.
+                    self.modifiers = ModifiersState::empty();
+                    self.option_left = false;
+                    self.option_right = false;
+                    if cfg!(target_os = "macos") {
+                        if let Some(window) = &self.window {
+                            window.set_ime_allowed(true);
+                        }
+                    }
                     if let Some(layer) = &mut self.native_cursor { layer.hide(); }
                 }
                 if let Some(window) = &self.window { window.request_redraw(); }
@@ -1920,6 +1970,8 @@ fn main() -> Result<()> {
         font_loader: Some(font_loader),
         native_cursor: None,
         modifiers: ModifiersState::empty(),
+        option_left: false,
+        option_right: false,
         ime: ImeState::default(),
         mouse: (0.0, 0.0),
         mouse_reporter: MouseReporter::default(),

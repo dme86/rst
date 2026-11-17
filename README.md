@@ -50,6 +50,33 @@ Double-click selects a word; triple-click selects a line. **Option/Alt+drag**
 selects a rectangle, and **Shift+mouse** selects text inside mouse-aware apps.
 The URL picker uses **j/k** or arrows, **Enter** to open, and **Esc** to close.
 
+## macOS Option / Alt / Meta keys
+
+On macOS, rst treats **left Option (⌥) as terminal Alt/Meta** by default:
+`Option+j` sends `ESC j`, and `Option+k` sends `ESC k`. This is the
+encoding expected by Emacs/Vim-style apps such as Remacs, as well as most
+shells and terminal programs. **Right Option** still enters macOS alternate
+characters, accent compositions, and symbols (especially useful on non-US
+keyboard layouts).
+
+You can choose which Option key acts as terminal Alt/Meta in
+`~/.config/rst/config.toml`:
+
+```toml
+[keyboard]
+option_as_alt = "left" # "none", "left" (default), "right" or "both"
+```
+
+Choose `"none"` if you prefer both Option keys to type macOS characters,
+or `"both"` if you prefer classic Meta behavior on both sides.
+The setting is ignored on Linux/Wayland. Restart rst after changing it.
+
+To check what the application receives inside rst, run
+`od -An -tx1`, press left `Option+j`, then left `Option+k`, and
+exit with `Ctrl+C`. You should see `1b 6a 1b 6b` (possibly
+distributed across several output lines). A shell or tmux configuration
+can separately intercept these shortcuts before they reach Remacs.
+
 ## Get started
 
 Install [Rust](https://rustup.rs/), then:
