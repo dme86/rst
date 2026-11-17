@@ -12,6 +12,8 @@ pub struct Config {
     pub cursor: CursorConfig,
     pub scrollback: ScrollbackConfig,
     pub terminal: TerminalConfig,
+    #[serde(default)]
+    pub keyboard: KeyboardConfig,
     pub clipboard: ClipboardConfig,
     #[serde(default)]
     pub command_output: CommandOutputConfig,
@@ -90,6 +92,38 @@ impl TerminalConfig {
         std::env::var("SHELL").ok().filter(|shell| !shell.is_empty())
             .unwrap_or_else(|| "/bin/sh".into())
     }
+}
+
+/// On macOS the Option key produces alternate Unicode characters by
+/// default. Terminals can instead forward its base key with the Meta (ESC)
+/// prefix, allowing Alt+j/k in TUIs. The unused Option key remains available
+/// for accents and symbols.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionAsAlt {
+    None,
+    #[default]
+    Left,
+    Right,
+    Both,
+}
+
+impl OptionAsAlt {
+    pub fn active(self, alt: bool, left: bool, right: bool) -> bool {
+        if !alt { return false; }
+        match self {
+            Self::None => false,
+            Self::Left => left,
+            Self::Right => right,
+            Self::Both => left || right,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct KeyboardConfig {
+    pub option_as_alt: OptionAsAlt,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -286,6 +320,36 @@ pub fn load() -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_option_meta_defaults_to_left_and_preserves_backward_compatibility() {
+        let defaults: Config =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        assert_eq!(defaults.keyboard.option_as_alt, OptionAsAlt::Left);
+
+        let mut legacy: toml::Value =
+            toml::from_str(include_str!("../config/default.toml")).unwrap();
+        legacy.as_table_mut().unwrap().remove("keyboard");
+        let legacy: Config = legacy.try_into().unwrap();
+        assert_eq!(legacy.keyboard.option_as_alt, OptionAsAlt::Left);
+        assert!(OptionAsAlt::Left.active(true, true, false));
+        assert!(!OptionAsAlt::Left.active(true, false, true));
+        assert!(!OptionAsAlt::Left.active(false, true, false));
+        assert!(OptionAsAlt::Both.active(true, false, true));
+        assert!(!OptionAsAlt::None.active(true, true, true));
+        assert!(toml::from_str::<KeyboardConfig>("option_as_alt = 'unknown'").is_err());
+        for (name, expected) in [
+            ("none", OptionAsAlt::None),
+            ("left", OptionAsAlt::Left),
+            ("right", OptionAsAlt::Right),
+            ("both", OptionAsAlt::Both)
+        ] {
+            let item: KeyboardConfig = toml::from_str(
+                &format!("option_as_alt = '{name}'")
+            ).unwrap();
+            assert_eq!(item.option_as_alt, expected);
+        }
+    }
 
     #[test]
     fn command_output_capture_limit_is_backward_compatible() {
