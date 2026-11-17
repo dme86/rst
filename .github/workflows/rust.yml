@@ -2,7 +2,7 @@ name: Rust CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/macos-option-meta-shortcuts]
   pull_request:
 
 jobs:
